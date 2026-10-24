@@ -1,0 +1,6 @@
+{
+  "name": "AutoApply AI & MockATS Sandbox",
+  "description": "Autonomous hybrid-agentic job application browser engine with live DOM distillation, synthetic React event injection, Shadow DOM traversal, and the 4-page MockATS Torture-Chamber testbed.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
