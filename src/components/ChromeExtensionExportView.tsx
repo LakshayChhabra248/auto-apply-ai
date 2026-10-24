@@ -26,9 +26,105 @@ import {
 
 const SAMPLE_MULTI_TYPE_ATS_QUESTIONS: DetectedFormQuestion[] = [
   {
+    question_id: 'q_stripe_1',
+    agent_ids: ['el_s1'],
+    question_text: 'First Name *',
+    question_type: 'SHORT_TEXT',
+    question_type_label: 'Short Text Input',
+    raw_input_type: 'text',
+    options: [],
+  },
+  {
+    question_id: 'q_stripe_2',
+    agent_ids: ['el_s2'],
+    question_text: 'Last Name *',
+    question_type: 'SHORT_TEXT',
+    question_type_label: 'Short Text Input',
+    raw_input_type: 'text',
+    options: [],
+  },
+  {
+    question_id: 'q_stripe_pref',
+    agent_ids: ['el_spref'],
+    question_text: 'Preferred Name',
+    question_type: 'SHORT_TEXT',
+    question_type_label: 'Short Text Input',
+    raw_input_type: 'text',
+    options: [],
+  },
+  {
+    question_id: 'q_stripe_pronouns',
+    agent_ids: ['el_spron'],
+    question_text: 'Pronouns',
+    question_type: 'SHORT_TEXT',
+    question_type_label: 'Short Text Input',
+    raw_input_type: 'text',
+    options: [],
+  },
+  {
+    question_id: 'q_stripe_3',
+    agent_ids: ['el_s3'],
+    question_text: 'Email *',
+    question_type: 'SHORT_TEXT',
+    question_type_label: 'Short Text (Email)',
+    raw_input_type: 'email',
+    options: [],
+  },
+  {
+    question_id: 'q_stripe_4',
+    agent_ids: ['el_s4'],
+    question_text: 'Country *',
+    question_type: 'DROPDOWN',
+    question_type_label: 'Dropdown (Combobox)',
+    raw_input_type: 'combobox',
+    options: [
+      { label: 'India (+91)', value: 'India' },
+      { label: 'United States (+1)', value: 'United States' },
+      { label: 'United Kingdom (+44)', value: 'United Kingdom' },
+      { label: 'Singapore (+65)', value: 'Singapore' },
+    ],
+  },
+  {
+    question_id: 'q_stripe_5',
+    agent_ids: ['el_s5'],
+    question_text: 'Phone *',
+    question_type: 'SHORT_TEXT',
+    question_type_label: 'Short Text (Phone)',
+    raw_input_type: 'tel',
+    options: [],
+  },
+  {
+    question_id: 'q_stripe_links',
+    agent_ids: ['el_slinks'],
+    question_text: 'LinkedIn Profile, Github, Personal Website, or Portfolio',
+    question_type: 'SHORT_TEXT',
+    question_type_label: 'Short Text (URL)',
+    raw_input_type: 'url',
+    options: [],
+  },
+  {
+    question_id: 'q_stripe_end_year',
+    agent_ids: ['el_sendyr'],
+    question_text: 'End Date Year *',
+    question_type: 'SHORT_TEXT',
+    question_type_label: 'Short Text Input',
+    raw_input_type: 'text',
+    options: [],
+  },
+  {
+    question_id: 'q_stripe_deadline',
+    agent_ids: ['el_sdead'],
+    question_text:
+      'Do you have an active offer deadline or another recruiting-process deadline we should be aware of? If yes, please share the deadline date and any relevant context. *',
+    question_type: 'LONG_ESSAY',
+    question_type_label: 'Long Essay / Screening',
+    raw_input_type: 'textarea',
+    options: [],
+  },
+  {
     question_id: 'q_1',
     agent_ids: ['el_1'],
-    question_text: 'Highest Education Qualification / Degree',
+    question_text: 'Highest Education Qualification / Degree *',
     question_type: 'DROPDOWN',
     question_type_label: 'Dropdown (4 options)',
     raw_input_type: 'select-one',
@@ -50,16 +146,6 @@ const SAMPLE_MULTI_TYPE_ATS_QUESTIONS: DetectedFormQuestion[] = [
     date_format: 'YYYY-MM',
   },
   {
-    question_id: 'q_3',
-    agent_ids: ['el_3'],
-    question_text: 'Earliest Available Joining Date',
-    question_type: 'DT_PICKER',
-    question_type_label: 'DT Picker (YYYY-MM-DD)',
-    raw_input_type: 'date',
-    options: [],
-    date_format: 'YYYY-MM-DD',
-  },
-  {
     question_id: 'q_4',
     agent_ids: ['el_4a', 'el_4b'],
     question_text: 'Are you legally authorized to work in India without visa sponsorship?',
@@ -70,15 +156,6 @@ const SAMPLE_MULTI_TYPE_ATS_QUESTIONS: DetectedFormQuestion[] = [
       { label: 'Yes — I am legally authorized to work', value: 'yes', agent_id: 'el_4a' },
       { label: 'No — I require visa sponsorship', value: 'no', agent_id: 'el_4b' },
     ],
-  },
-  {
-    question_id: 'q_5',
-    agent_ids: ['el_5'],
-    question_text: 'Cumulative GPA / CGPA (on a 10.0 scale)',
-    question_type: 'NUMBER_INPUT',
-    question_type_label: 'Number Input',
-    raw_input_type: 'number',
-    options: [],
   },
   {
     question_id: 'q_6',
@@ -110,7 +187,19 @@ export const ChromeExtensionExportView: React.FC = () => {
   const [previewEngine, setPreviewEngine] = useState<string | null>(null);
   const [previewIsParsing, setPreviewIsParsing] = useState<boolean>(false);
   const [previewFullProfile, setPreviewFullProfile] = useState<UserProfileSchema | null>(null);
-  const [previewAnswers, setPreviewAnswers] = useState<AgentQuestionAnswer[]>([]);
+  const [previewAnswers, setPreviewAnswers] = useState<AgentQuestionAnswer[]>(() =>
+    SAMPLE_MULTI_TYPE_ATS_QUESTIONS.map((q) => ({
+      question_id: q.question_id,
+      agent_ids: q.agent_ids,
+      question_text: q.question_text,
+      question_type: q.question_type,
+      question_type_label: q.question_type_label,
+      answer: '',
+      confidence: 0.95,
+      profile_source: 'Upload resume above to auto-generate answer',
+      reasoning: `Detected ${q.question_type_label} on active page`,
+    }))
+  );
   const [isScanningQuestions, setIsScanningQuestions] = useState<boolean>(false);
 
   // Custom question tester inside SidePanel simulator
@@ -121,8 +210,9 @@ export const ChromeExtensionExportView: React.FC = () => {
   const [isAskingCustomQ, setIsAskingCustomQ] = useState<boolean>(false);
 
   const [previewLogs, setPreviewLogs] = useState<string[]>([
-    'Extension v1.3 installed (clean, unseeded storage).',
-    'Upload your PDF or TXT resume above to extract your profile and activate the AI Question & Type Agent.',
+    'Extension v1.5 installed (clean, unseeded storage).',
+    `Auto-scanned ${SAMPLE_MULTI_TYPE_ATS_QUESTIONS.length} questions across all frames (including Preferred Name, Pronouns, End Date Year *, and Offer Deadlines).`,
+    'Upload your PDF or TXT resume above to generate tailored answers from your profile.',
   ]);
 
   const activeFile = extensionFiles[selectedFileIndex] || extensionFiles[0];
@@ -366,30 +456,29 @@ export const ChromeExtensionExportView: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Top Banner: Clean, Unseeded Chrome Extension (Manifest V3 v1.3) Packager */}
+      {/* Top Banner: Clean, Unseeded Chrome Extension (Manifest V3 v1.5) Packager */}
       <section className="bg-white border border-slate-200 rounded-lg p-6 space-y-5">
         <div className="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-slate-200">
           <div className="space-y-1 max-w-3xl">
             <div className="flex items-center gap-2">
               <span className="px-2 py-0.5 text-[11px] font-mono font-semibold bg-blue-50 text-blue-700 border border-blue-200 rounded">
-                MANIFEST V3 v1.3 · AI QUESTION &amp; TYPE AGENT
+                MANIFEST V3 v1.5 · CONTEXT-AWARE QUESTION &amp; TYPE AGENT
               </span>
               <span className="text-xs font-mono text-emerald-700">
-                Detects Dropdowns, DT Pickers, Option Selections &amp; Answers Any Question From Profile
+                Fixes Preferred Name, Pronouns, End Date Year &amp; Offer Deadline Answers on Stripe Careers
               </span>
             </div>
             <h1 className="text-xl font-bold text-slate-900">
-              Standalone Chrome Extension — AI Question Type Detector &amp; Profile Answer Agent
+              Standalone Chrome Extension v1.5 — Context-Aware Question Scanner &amp; Profile Answer Agent
             </h1>
             <p className="text-sm text-slate-600">
-              Download <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">v1.3.0</code>{' '}
+              Download <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">v1.5.0</code>{' '}
               below and click <strong>Reload</strong> in{' '}
               <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">chrome://extensions</code>.
-              The extension now inspects every form question, identifies its exact control type (
-              <strong>Dropdown</strong>, <strong>DT Picker</strong>, <strong>Option Selection</strong>,{' '}
-              <strong>Number</strong>, <strong>Short Text</strong>, or <strong>Long Essay</strong>),
-              and uses Gemini AI (<code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">PROXY_PLAN_FORM</code>)
-              + the Profile Reasoner to answer any question from your generated profile.
+              Version 1.5 maps <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">Preferred Name</code> to your first name,{' '}
+              <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">Pronouns</code> to <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">He/Him</code>,{' '}
+              <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">End Date Year *</code> to your graduation year, and answers logistical questions like{' '}
+              <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">Do you have an active offer deadline...</code> directly instead of dumping a work-experience bio.
             </p>
           </div>
 
@@ -406,7 +495,7 @@ export const ChromeExtensionExportView: React.FC = () => {
             ) : (
               <>
                 <Download className="w-4 h-4" />
-                <span>Download Chrome Extension v1.3 (.zip)</span>
+                <span>Download Chrome Extension v1.5 (.zip)</span>
               </>
             )}
           </button>
@@ -416,28 +505,28 @@ export const ChromeExtensionExportView: React.FC = () => {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5">
             <div className="text-xs font-mono font-bold text-blue-600">STEP 01</div>
-            <h2 className="text-sm font-semibold text-slate-900">Download &amp; Reload v1.3</h2>
+            <h2 className="text-sm font-semibold text-slate-900">Download &amp; Reload v1.5</h2>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Click <strong>Download Chrome Extension v1.3 (.zip)</strong> above, extract it, and
+              Click <strong>Download Chrome Extension v1.5 (.zip)</strong> above, extract it, and
               click <strong>Reload</strong> in <code className="font-mono">chrome://extensions</code>.
             </p>
           </div>
 
           <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5">
             <div className="text-xs font-mono font-bold text-blue-600">STEP 02</div>
-            <h2 className="text-sm font-semibold text-slate-900">Upload Resume in SidePanel</h2>
+            <h2 className="text-sm font-semibold text-slate-900">Auto-Scans All Frames</h2>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Upload your PDF or TXT resume in the SidePanel to decompress the PDF text and build
-              your <code className="font-mono">profile_schema.json</code> with Gemini AI.
+              As soon as you open the SidePanel on Stripe Careers, Greenhouse, or Workday, v1.5
+              injects <code className="font-mono">content.js</code> and lists all detected questions.
             </p>
           </div>
 
           <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5">
             <div className="text-xs font-mono font-bold text-blue-600">STEP 03</div>
-            <h2 className="text-sm font-semibold text-slate-900">Scan Questions &amp; Types</h2>
+            <h2 className="text-sm font-semibold text-slate-900">Upload Resume in SidePanel</h2>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Click <strong>1. Scan Questions, Types &amp; Generate AI Answers</strong> to see every
-              question, its type (Dropdown, DT Picker, Radio), and the AI-generated answer.
+              Upload your PDF or TXT resume to extract your profile and automatically generate
+              answers for every Dropdown, DT Picker, Radio, and Essay question.
             </p>
           </div>
 
@@ -460,7 +549,7 @@ export const ChromeExtensionExportView: React.FC = () => {
             <div className="flex items-center gap-2">
               <FileCode className="w-4 h-4 text-blue-400" />
               <span className="text-xs font-semibold text-white">
-                Unseeded Chrome Extension v1.3 Source Files (Manifest V3)
+                Unseeded Chrome Extension v1.5 Source Files (Manifest V3)
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -525,7 +614,7 @@ export const ChromeExtensionExportView: React.FC = () => {
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div>
                 <span className="text-[10px] font-mono uppercase tracking-wider text-blue-400 block">
-                  Interactive SidePanel Simulator (sidepanel.html v1.3)
+                  Interactive SidePanel Simulator (sidepanel.html v1.5)
                 </span>
                 <h2 className="text-sm font-bold text-white">AutoApply AI Agent — Chrome SidePanel</h2>
               </div>
@@ -604,21 +693,27 @@ export const ChromeExtensionExportView: React.FC = () => {
                   2. AI Form Question &amp; Type Agent
                 </span>
                 <span className="font-mono text-[11px] text-emerald-400">
-                  {previewAnswers.length} questions analyzed
+                  {previewAnswers.length} questions
                 </span>
               </div>
 
               <button
                 type="button"
                 id="btn-preview-scan-questions"
-                disabled={!previewFullProfile || isScanningQuestions}
-                onClick={() =>
-                  previewFullProfile &&
-                  runAgentQuestionScanWithProfile(
-                    previewFullProfile,
-                    previewResumeName || undefined
-                  )
-                }
+                disabled={isScanningQuestions}
+                onClick={() => {
+                  if (previewFullProfile) {
+                    runAgentQuestionScanWithProfile(
+                      previewFullProfile,
+                      previewResumeName || undefined
+                    );
+                  } else {
+                    setPreviewLogs((prev) => [
+                      ...prev,
+                      `Scanned ${SAMPLE_MULTI_TYPE_ATS_QUESTIONS.length} questions across all frames. Upload your resume above to generate tailored answers.`,
+                    ]);
+                  }
+                }}
                 className="w-full py-2 px-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-xs font-semibold text-white rounded flex items-center justify-center gap-1.5 transition-colors"
               >
                 {isScanningQuestions ? (
@@ -626,7 +721,7 @@ export const ChromeExtensionExportView: React.FC = () => {
                 ) : (
                   <Sparkles className="w-3.5 h-3.5" />
                 )}
-                <span>Scan Questions, Detect Types &amp; Generate AI Answers</span>
+                <span>1. Scan Questions, Types &amp; Generate AI Answers</span>
               </button>
 
               {previewAnswers.length > 0 && (
@@ -823,7 +918,7 @@ export const ChromeExtensionExportView: React.FC = () => {
             <div className="flex items-center gap-2 pb-2 border-b border-slate-200">
               <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
               <h3 className="text-sm font-semibold text-slate-900">
-                How v1.3 Detects Question Types &amp; Generates Profile Answers
+                How v1.5 Detects Question Types &amp; Generates Context-Aware Profile Answers
               </h3>
             </div>
 

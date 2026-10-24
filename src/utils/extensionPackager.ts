@@ -6,13 +6,15 @@ export interface ExtensionFileEntry {
 }
 
 /**
- * Generates a clean, unseeded Chrome Extension (Manifest V3 v1.3.0) bundle.
+ * Generates a clean, unseeded Chrome Extension (Manifest V3 v1.5.0) bundle.
  * Includes:
- * 1. AI Question & Control Type Scanner in content.js (detects DROPDOWN, DT_PICKER, OPTION_SELECTION,
- *    NUMBER_INPUT, LONG_ESSAY, SHORT_TEXT, FILE_UPLOAD, and groups radio/checkbox options under their parent question).
- * 2. Universal Profile Question-Answering Agent + Same-Origin Gemini AI Bridge (PROXY_PLAN_FORM & PROXY_PARSE_RESUME)
- *    so the extension can answer ANY question from the candidate's generated profile.
- * 3. Native browser DecompressionStream('deflate') PDF text extractor + multi-section resume parser in sidepanel.js.
+ * 1. Multi-Frame Script Injection & Aggregation (`chrome.scripting.executeScript` with `allFrames: true`)
+ *    so blank analytics iframes never race-out real form frames (fixes "0 questions" on Stripe Careers, Greenhouse iframes, Workday, Ashby).
+ * 2. Deep 6-Level Ancestor Field Label Walker + Custom Dropdown (`<button aria-haspopup="listbox">`, `[role="combobox"]`) detector
+ *    for Stripe Careers, Greenhouse, Lever, Workday, and React-Select forms.
+ * 3. Context-Aware Semantic Question-Answering Agent (Preferred Name, Pronouns, Offer Deadlines, Start/End Year & Month,
+ *    Education, Referrals, Visa/Work Authorization, plus strict SHORT_TEXT concise guards so short inputs never get bio dumps).
+ * 4. Native browser DecompressionStream('deflate') PDF text extractor + multi-section resume parser in sidepanel.js.
  */
 export function buildChromeExtensionFiles(backendUrl: string): ExtensionFileEntry[] {
   const safeBackendUrl = backendUrl.replace(/\/$/, '');
@@ -21,9 +23,9 @@ export function buildChromeExtensionFiles(backendUrl: string): ExtensionFileEntr
     {
       manifest_version: 3,
       name: 'AutoApply AI — Autonomous ATS Form Agent',
-      version: '1.3.0',
+      version: '1.5.0',
       description:
-        'Autonomous AI Agent that scans form questions, detects control types (Dropdown, DT Picker, Option Selection, Essay), generates answers from your resume profile, and autofills any ATS.',
+        'Autonomous AI Agent that scans form questions across all frames, detects control types (Dropdown, DT Picker, Option Selection, Essay), generates accurate context-aware answers from your resume profile, and autofills any ATS.',
       permissions: ['storage', 'activeTab', 'scripting', 'sidePanel', 'tabs'],
       host_permissions: ['<all_urls>'],
       background: {
@@ -49,7 +51,7 @@ export function buildChromeExtensionFiles(backendUrl: string): ExtensionFileEntr
   );
 
   const backgroundJs = `/**
- * AutoApply AI — Manifest V3 Background Service Worker (v1.3.0)
+ * AutoApply AI — Manifest V3 Background Service Worker (v1.5.0)
  * Starts completely clean (NO pre-seeded dummy profile).
  * Coordinates multi-page form navigation and persistent storage for the AI Form Agent.
  */
@@ -100,19 +102,16 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 `;
 
   const contentJs = `/**
- * AutoApply AI — Universal AI Agent Content Script (Manifest V3 v1.3.0)
- * 1. Scans any webpage form and properly extracts the overarching Question Text + Option Labels.
- * 2. Detects the exact Question Type: DROPDOWN, DT_PICKER, OPTION_SELECTION (Radio/Checkbox),
- *    NUMBER_INPUT, LONG_ESSAY, SHORT_TEXT, or FILE_UPLOAD.
- * 3. Bridges Gemini AI calls (PROXY_PARSE_RESUME & PROXY_PLAN_FORM) same-origin when running on the AutoApply AI tab.
- * 4. Injects answers using React-compatible native prototype setters, dropdown option matching,
- *    DT Picker date formatting, and MutationObserver re-scanning for conditional questions.
+ * AutoApply AI — Universal AI Agent Content Script (Manifest V3 v1.5.0)
+ * 1. Scans any webpage or embedded ATS iframe (Stripe Careers, Greenhouse, Workday, Lever, Ashby)
+ *    and extracts overarching Question Prompts + Option Labels using a 6-level ancestor DOM walker.
+ * 2. Detects exact Question Types: DROPDOWN (including custom <button role="combobox"> & React-Select),
+ *    DT_PICKER, OPTION_SELECTION (Radio/Checkbox), NUMBER_INPUT, LONG_ESSAY, SHORT_TEXT, and FILE_UPLOAD.
+ * 3. Accurately answers Preferred Name, Pronouns, Offer Deadlines, Start/End Date Year/Month, Education,
+ *    Referrals, and Work Authorization without ever dumping multi-sentence bios into SHORT_TEXT or logistical fields.
  */
 
 (function () {
-  if (window.__autoApplyContentScriptLoaded) return;
-  window.__autoApplyContentScriptLoaded = true;
-
   // 1. React/Vue/Angular Native Value Setter
   function setNativeValue(element, value) {
     if (!element) return;
@@ -171,14 +170,24 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     }
   }
 
-  // 3. Properly extract BOTH the Option Label (for radio/checkbox) AND the Overarching Question Prompt
+  function cleanLabelText(raw) {
+    return String(raw || '')
+      .replace(/\\s+/g, ' ')
+      .replace(/^(required|optional)\\s*[:\\-]?\\s*/i, '')
+      .trim();
+  }
+
+  // 3. Deep 6-Level Ancestor Field Label Resolver (handles Stripe Careers, Greenhouse, Workday, React-Select)
   function resolveFieldLabel(el) {
     const root =
       el.getRootNode && el.getRootNode() instanceof ShadowRoot ? el.getRootNode() : document;
 
-    const explicitQuestion = el.getAttribute('data-question') || el.getAttribute('data-label');
-    if (explicitQuestion && explicitQuestion.trim().length > 2) {
-      return explicitQuestion.trim();
+    const explicitQuestion =
+      el.getAttribute('data-question') ||
+      el.getAttribute('data-label') ||
+      el.getAttribute('data-field-label');
+    if (explicitQuestion && cleanLabelText(explicitQuestion).length > 1) {
+      return cleanLabelText(explicitQuestion);
     }
 
     const ariaLabelledBy = el.getAttribute('aria-labelledby');
@@ -187,41 +196,108 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       const texts = ids
         .map((id) => {
           const refEl = root.querySelector('#' + CSS.escape(id));
-          return refEl && refEl.textContent ? refEl.textContent.trim() : '';
+          return refEl && refEl.textContent ? cleanLabelText(refEl.textContent) : '';
         })
         .filter(Boolean);
       if (texts.length > 0) return texts.join(' ');
     }
 
     const ariaLabel = el.getAttribute('aria-label');
-    if (ariaLabel && ariaLabel.trim().length > 1) return ariaLabel.trim();
+    if (ariaLabel && cleanLabelText(ariaLabel).length > 1) {
+      return cleanLabelText(ariaLabel);
+    }
 
     if (el.id) {
-      const explicit = root.querySelector('label[for="' + CSS.escape(el.id) + '"]');
-      if (explicit && explicit.textContent) return explicit.textContent.trim();
+      try {
+        const explicit = root.querySelector('label[for="' + CSS.escape(el.id) + '"]');
+        if (explicit && explicit.textContent && cleanLabelText(explicit.textContent).length > 1) {
+          return cleanLabelText(explicit.textContent);
+        }
+      } catch (_e) {
+        // ignore invalid selector
+      }
     }
 
     const parentLabel = el.closest('label');
     if (parentLabel && parentLabel.textContent) {
-      return parentLabel.textContent.trim();
+      const clone = parentLabel.cloneNode(true);
+      clone.querySelectorAll('input, select, textarea, button').forEach((n) => n.remove());
+      const txt = cleanLabelText(clone.textContent || parentLabel.textContent);
+      if (txt.length > 1) return txt;
     }
 
-    const wrapper = el.closest(
-      '[role="listitem"], fieldset, .form-group, .field, section, div'
-    );
-    if (wrapper) {
-      const lbl = wrapper.querySelector(
-        'legend, [role="heading"], label, [class*="label"], [class*="question"], h3, h4, p'
+    // Walk up 1 to 6 ancestor levels (crucial for Stripe Careers / React forms where <input> is wrapped in 1-3 inner styling <div>s)
+    let curr = el.parentElement;
+    for (let depth = 0; depth < 6 && curr && curr !== document.body && curr !== document.documentElement; depth++) {
+      // Check previous sibling at this level (e.g. <label>First Name *</label><div class="input-wrap"><input/></div>)
+      const prev = curr.previousElementSibling;
+      if (
+        prev &&
+        !prev.querySelector('input:not([type="hidden"]), select, textarea') &&
+        /^(label|legend|span|div|p|h[1-6])$/i.test(prev.tagName)
+      ) {
+        const prevTxt = cleanLabelText(prev.textContent);
+        if (prevTxt.length >= 2 && prevTxt.length <= 140) {
+          return prevTxt;
+        }
+      }
+
+      // Count how many distinct primary fields exist inside curr so we don't bleed across multi-column rows (like Country * and Phone *)
+      const primaryInputs = curr.querySelectorAll(
+        'input:not([type="hidden"]):not([type="radio"]):not([type="checkbox"]), select, textarea, button[aria-haspopup="listbox"], button[role="combobox"]'
       );
-      if (lbl && lbl.textContent && !lbl.contains(el)) {
-        return lbl.textContent.trim();
+      if (primaryInputs.length > 1 && depth > 0) {
+        break;
       }
-      if (lbl && lbl.textContent) {
-        return lbl.textContent.trim();
+
+      // First look for explicit <label>, <legend>, or field-label classes (ignoring generic section headings like "Education" or "Experience")
+      const labelCand = curr.querySelector(
+        'label, legend, [class*="label" i], [class*="Label"], [data-testid*="label" i], [class*="question" i]'
+      );
+      if (labelCand && !labelCand.contains(el)) {
+        const candTxt = cleanLabelText(labelCand.textContent);
+        if (
+          candTxt.length >= 2 &&
+          candTxt.length <= 160 &&
+          !/^(education|work experience|experience|personal information|voluntary self-identification|eeo)$/i.test(candTxt)
+        ) {
+          return candTxt;
+        }
       }
+
+      // Fallback to heading inside single-field wrapper if not a broad section title
+      const headingCand = curr.querySelector('[role="heading"], h3, h4');
+      if (headingCand && !headingCand.contains(el)) {
+        const hTxt = cleanLabelText(headingCand.textContent);
+        if (
+          hTxt.length >= 2 &&
+          hTxt.length <= 160 &&
+          !/^(education|work experience|experience|personal information|voluntary self-identification|eeo)$/i.test(hTxt)
+        ) {
+          return hTxt;
+        }
+      }
+
+      curr = curr.parentElement;
     }
 
-    return el.getAttribute('placeholder') || el.getAttribute('name') || el.tagName.toLowerCase();
+    const placeholder = cleanLabelText(el.getAttribute('placeholder') || '');
+    if (placeholder && !/^(select|choose|type here|enter)/i.test(placeholder)) {
+      return placeholder;
+    }
+
+    const rawName = el.getAttribute('name') || el.id || '';
+    if (rawName) {
+      const humanized = rawName
+        .replace(/([a-z])([A-Z])/g, '$1 $2')
+        .replace(/[_\\-\\[\\].]+/g, ' ')
+        .replace(/\\b(input|field|text|id)\\b/gi, '')
+        .replace(/\\s+/g, ' ')
+        .trim();
+      if (humanized.length >= 2) return humanized;
+    }
+
+    return placeholder || el.tagName.toLowerCase();
   }
 
   /**
@@ -230,34 +306,33 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
    */
   function resolveGroupQuestionTitle(el, optionLabel) {
     const explicitQ = el.getAttribute('data-question');
-    if (explicitQ) return explicitQ.trim();
+    if (explicitQ) return cleanLabelText(explicitQ);
 
     const fieldset = el.closest('fieldset');
     if (fieldset) {
       const legend = fieldset.querySelector('legend');
-      if (legend && legend.textContent) return legend.textContent.trim();
+      if (legend && legend.textContent) return cleanLabelText(legend.textContent);
     }
 
     const radioGroup = el.closest('[role="radiogroup"], [role="group"], [role="listitem"]');
     if (radioGroup) {
       const heading = radioGroup.querySelector(
-        '[role="heading"], legend, h3, h4, [class*="question"], [class*="title"], p, label:not(:has(input))'
+        '[role="heading"], legend, h3, h4, [class*="question" i], [class*="title" i], [class*="label" i], p, label:not(:has(input))'
       );
-      if (heading && heading.textContent) return heading.textContent.trim();
+      if (heading && heading.textContent) return cleanLabelText(heading.textContent);
     }
 
-    // Walk up 3 ancestor containers looking for a question label or heading that doesn't just say "Yes"/"No"
     let curr = el.parentElement;
-    for (let depth = 0; depth < 4 && curr; depth++) {
+    for (let depth = 0; depth < 5 && curr && curr !== document.body; depth++) {
       const candidates = curr.querySelectorAll('legend, label, p, h3, h4, span, div');
       for (const cand of candidates) {
         if (cand.contains(el)) continue;
-        const txt = (cand.textContent || '').replace(/\\s+/g, ' ').trim();
+        const txt = cleanLabelText(cand.textContent || '');
         if (
           txt.length >= 10 &&
           txt.length <= 220 &&
           txt.toLowerCase() !== (optionLabel || '').toLowerCase() &&
-          (txt.includes('?') || /sponsorship|authorized|relocate|gender|veteran|disability|experience|notice|degree|work/i.test(txt))
+          (txt.includes('?') || /sponsorship|authorized|relocate|gender|veteran|disability|experience|notice|degree|work|intern|consent|acknowledge/i.test(txt))
         ) {
           return txt;
         }
@@ -268,6 +343,30 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     return optionLabel || el.getAttribute('name') || 'Selection Question';
   }
 
+  function isCustomDropdownTrigger(node) {
+    const tag = node.tagName.toLowerCase();
+    const role = (node.getAttribute('role') || '').toLowerCase();
+    const hasPopup = (node.getAttribute('aria-haspopup') || '').toLowerCase();
+    const cls = String(node.className || '');
+
+    if (role === 'combobox' || role === 'listbox' || hasPopup === 'listbox') {
+      // If this container wraps an inner <input> or <select>, let the inner input be the primary control
+      if (tag !== 'button' && node.querySelector('input:not([type="hidden"]), select')) {
+        return false;
+      }
+      return true;
+    }
+
+    if (tag === 'button') {
+      // Detect Stripe / Radix / HeadlessUI select buttons that have aria-expanded or sit inside a labeled select field
+      if (node.hasAttribute('aria-expanded') && (hasPopup === 'listbox' || hasPopup === 'true' || /select|dropdown|combobox|country/i.test(cls + ' ' + (node.id || '')))) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   /**
    * Classifies any DOM element into its semantic Question Type:
    * DROPDOWN, DT_PICKER, OPTION_SELECTION, NUMBER_INPUT, LONG_ESSAY, SHORT_TEXT, FILE_UPLOAD
@@ -276,9 +375,10 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     const tag = el.tagName.toLowerCase();
     const type = (el.getAttribute('type') || tag).toLowerCase();
     const role = (el.getAttribute('role') || '').toLowerCase();
+    const hasPopup = (el.getAttribute('aria-haspopup') || '').toLowerCase();
     const placeholder = el.getAttribute('placeholder') || '';
     const isReadonly = el.hasAttribute('readonly');
-    const combined = (questionText + ' ' + placeholder + ' ' + (el.getAttribute('name') || '')).toLowerCase();
+    const combined = (questionText + ' ' + placeholder + ' ' + (el.getAttribute('name') || '') + ' ' + (el.id || '')).toLowerCase();
 
     if (type === 'file') {
       return { question_type: 'FILE_UPLOAD', question_type_label: 'File Upload (PDF)' };
@@ -300,13 +400,20 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
             : 'Short Text (URL)',
       };
     }
+    const isStandaloneYearOrMonthField =
+      type !== 'date' &&
+      type !== 'month' &&
+      type !== 'datetime-local' &&
+      /\\b(year|month)\\b/i.test(combined);
+
     if (
-      type === 'date' ||
-      type === 'month' ||
-      type === 'datetime-local' ||
-      type === 'time' ||
-      /\\b(start\\s*date|end\\s*date|date\\s*of\\s*birth|dob|joining\\s*date|available\\s*date|graduation\\s*date)\\b/i.test(combined) ||
-      /\\b(yyyy-mm-dd|yyyy-mm|mm\\/dd\\/yyyy|dd\\/mm\\/yyyy)\\b/i.test(combined)
+      !isStandaloneYearOrMonthField &&
+      (type === 'date' ||
+        type === 'month' ||
+        type === 'datetime-local' ||
+        type === 'time' ||
+        /\\b(start\\s*date|end\\s*date|date\\s*of\\s*birth|dob|joining\\s*date|available\\s*date|graduation\\s*date|earliest\\s*start)\\b/i.test(combined) ||
+        /\\b(yyyy-mm-dd|yyyy-mm|mm\\/dd\\/yyyy|dd\\/mm\\/yyyy)\\b/i.test(combined))
     ) {
       let dateFormat = 'YYYY-MM-DD';
       if (
@@ -328,16 +435,19 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       tag === 'select' ||
       role === 'combobox' ||
       role === 'listbox' ||
+      hasPopup === 'listbox' ||
+      isCustomDropdownTrigger(el) ||
       el.hasAttribute('list') ||
+      /react-select/i.test(el.id || '') ||
       (optionsList && optionsList.length > 0) ||
-      /\\b(current\\s*location|university|institution)\\b/i.test(combined)
+      /\\b(country|current\\s*location|university|institution|school|degree|discipline)\\b/i.test(combined)
     ) {
       const count = optionsList ? optionsList.length : 0;
       return {
         question_type: 'DROPDOWN',
         question_type_label:
-          role === 'combobox'
-            ? 'Dropdown (Typeahead Combobox)'
+          role === 'combobox' || hasPopup === 'listbox' || /react-select/i.test(el.id || '')
+            ? 'Dropdown (Combobox)'
             : count > 0
             ? 'Dropdown (' + count + ' options)'
             : 'Dropdown Select',
@@ -365,6 +475,28 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     };
   }
 
+  function isIgnoredChromeElement(node, labelText) {
+    const tag = node.tagName.toLowerCase();
+    const type = (node.getAttribute('type') || '').toLowerCase();
+    const nameAndId = ((node.getAttribute('name') || '') + ' ' + (node.id || '') + ' ' + (node.className || '')).toLowerCase();
+    const lowerLabel = (labelText || '').toLowerCase();
+
+    if (type === 'hidden' || type === 'search' || type === 'submit' || type === 'reset' || type === 'image') {
+      return true;
+    }
+    if (/g-recaptcha|h-captcha|turnstile|honeypot|csrf|search|cookie|onetrust/i.test(nameAndId)) {
+      return true;
+    }
+    // Ignore site header/navigation links or "Autofill my application" trigger buttons
+    if (tag === 'button' && /autofill|apply now|submit|sign in|log in|open roles|search|menu|close|back|next|continue/i.test(lowerLabel + ' ' + (node.textContent || ''))) {
+      return true;
+    }
+    if (node.closest('nav, header, footer, [role="navigation"], [id*="onetrust"]')) {
+      return true;
+    }
+    return false;
+  }
+
   // 4. Distill live DOM + Open Shadow DOM roots AND build structured Question list
   const elementMap = new Map();
 
@@ -381,22 +513,25 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
           walk(node.shadowRoot, true);
         }
         const tag = node.tagName.toLowerCase();
-        const role = node.getAttribute('role');
+        const role = (node.getAttribute('role') || '').toLowerCase();
+        const customDropdown = isCustomDropdownTrigger(node);
         const isInteractive =
           tag === 'input' ||
           tag === 'select' ||
           tag === 'textarea' ||
           tag === 'button' ||
-          role === 'combobox' ||
-          role === 'listbox' ||
-          role === 'button';
+          customDropdown;
 
         if (!isInteractive) return;
-        const type = (node.getAttribute('type') || tag).toLowerCase();
+        const type = (node.getAttribute('type') || (customDropdown ? 'combobox' : tag)).toLowerCase();
         if (type === 'hidden') return;
+        if (node.disabled) return;
 
         const rect = node.getBoundingClientRect();
         if (rect.width === 0 && rect.height === 0 && type !== 'file') return;
+
+        const itemLabel = resolveFieldLabel(node).replace(/\\s+/g, ' ').slice(0, 160);
+        if (isIgnoredChromeElement(node, itemLabel)) return;
 
         const agentId = 'el_' + counter++;
         node.setAttribute('data-autoapply-id', agentId);
@@ -423,7 +558,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
             .filter((o) => o.label);
         }
 
-        const itemLabel = resolveFieldLabel(node).replace(/\\s+/g, ' ').slice(0, 160);
         const groupQuestion =
           type === 'radio'
             ? resolveGroupQuestionTitle(node, itemLabel).replace(/\\s+/g, ' ').slice(0, 180)
@@ -433,13 +567,14 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
           agent_id: agentId,
           tag,
           type,
-          role: role || null,
+          role: role || (customDropdown ? 'combobox' : null),
+          is_custom_dropdown: customDropdown,
           name: node.getAttribute('name') || '',
           label: itemLabel,
           group_question: groupQuestion,
           placeholder: node.getAttribute('placeholder') || '',
           is_readonly: node.hasAttribute('readonly'),
-          current_value: node.value || '',
+          current_value: node.value || (customDropdown ? cleanLabelText(node.textContent || '') : ''),
           options: options ? options.map((o) => o.label) : null,
           option_objects: options,
           in_shadow_dom: inShadow,
@@ -464,7 +599,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     let qIdx = 1;
 
     for (const item of distilled) {
-      if (item.tag === 'button' || item.type === 'submit') continue;
+      if ((item.tag === 'button' && !item.is_custom_dropdown) || item.type === 'submit') continue;
 
       if (item.type === 'radio') {
         const gKey = item.name || item.group_question || 'radio_group';
@@ -522,7 +657,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       });
     }
 
-    const rawBytes = document.documentElement.outerHTML.length;
+    const rawBytes = document.documentElement ? document.documentElement.outerHTML.length : 1000;
     const distilledBytes = JSON.stringify(distilled).length;
     const reductionPct =
       rawBytes > 0 ? Math.max(0, ((rawBytes - distilledBytes) / rawBytes) * 100) : 95;
@@ -531,6 +666,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       questions,
       elements: distilled,
       pageTitle: document.title || location.href,
+      frameUrl: location.href,
       telemetry: {
         rawHtmlBytes: rawBytes,
         distilledJsonBytes: distilledBytes,
@@ -567,6 +703,11 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     );
     if (exact) return exact;
 
+    if (target === 'india' || target === '+91' || target.includes('india')) {
+      const ind = options.find((o) => /\\b(india|\\+91)\\b/i.test((o.label || '') + ' ' + (o.value || '')));
+      if (ind) return ind;
+    }
+
     if (target === 'yes' || target === 'true') {
       const yesOpt = options.find((o) => /\\b(yes|true|authorized|willing|agree)\\b/i.test(o.label));
       if (yesOpt) return yesOpt;
@@ -580,6 +721,39 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       const deg = options.find((o) => /b\\.?\\s*tech|bachelor|undergraduate|b\\.?e\\b/i.test(o.label));
       if (deg) return deg;
     }
+    if (/m\\.?\\s*tech|master/i.test(target)) {
+      const deg = options.find((o) => /m\\.?\\s*tech|master|postgraduate|m\\.?s\\b/i.test(o.label));
+      if (deg) return deg;
+    }
+
+    // Month synonym matching (e.g. "May" <-> "05", "August" <-> "08")
+    const MONTH_PATTERNS = {
+      january: /\\b(january|jan|0?1)\\b/i,
+      february: /\\b(february|feb|0?2)\\b/i,
+      march: /\\b(march|mar|0?3)\\b/i,
+      april: /\\b(april|apr|0?4)\\b/i,
+      may: /\\b(may|0?5)\\b/i,
+      june: /\\b(june|jun|0?6)\\b/i,
+      july: /\\b(july|jul|0?7)\\b/i,
+      august: /\\b(august|aug|0?8)\\b/i,
+      september: /\\b(september|sep|sept|0?9)\\b/i,
+      october: /\\b(october|oct|10)\\b/i,
+      november: /\\b(november|nov|11)\\b/i,
+      december: /\\b(december|dec|12)\\b/i,
+    };
+    if (MONTH_PATTERNS[target]) {
+      const mOpt = options.find((o) => MONTH_PATTERNS[target].test((o.label || '') + ' ' + (o.value || '')));
+      if (mOpt) return mOpt;
+    }
+
+    if (target.includes('he/him')) {
+      const pOpt = options.find((o) => /\\bhe\\s*\\/\\s*him/i.test(o.label || ''));
+      if (pOpt) return pOpt;
+    }
+    if (target.includes('she/her')) {
+      const pOpt = options.find((o) => /\\bshe\\s*\\/\\s*her/i.test(o.label || ''));
+      if (pOpt) return pOpt;
+    }
 
     const sub = options.find(
       (o) =>
@@ -590,6 +764,36 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     if (sub) return sub;
 
     return options[0];
+  }
+
+  const MONTH_NAMES = [
+    'January', 'February', 'March', 'April', 'May', 'June',
+    'July', 'August', 'September', 'October', 'November', 'December'
+  ];
+
+  function extractYearFromDate(rawDate, fallbackYear) {
+    if (!rawDate) return fallbackYear || '2026';
+    if (/present|current|now/i.test(String(rawDate))) return String(new Date().getFullYear());
+    const m = String(rawDate).trim().match(/(\\d{4})/);
+    return m ? m[1] : (fallbackYear || '2026');
+  }
+
+  function extractMonthFromDate(rawDate, fallbackMonth) {
+    if (!rawDate) return fallbackMonth || 'May';
+    const m = String(rawDate).trim().match(/^(\\d{4})-(\\d{1,2})/);
+    if (m && m[2]) {
+      const idx = Math.max(0, Math.min(11, parseInt(m[2], 10) - 1));
+      return MONTH_NAMES[idx] || fallbackMonth || 'May';
+    }
+    return fallbackMonth || 'May';
+  }
+
+  function derivePronouns(meta) {
+    const g = String((meta && meta.gender) || '').trim().toLowerCase();
+    if (g.startsWith('f') || g.includes('woman') || g.includes('female')) return 'She/Her';
+    if (g.startsWith('m') || g.includes('man') || g.includes('male')) return 'He/Him';
+    if (g.includes('non') || g.includes('they')) return 'They/Them';
+    return 'He/Him';
   }
 
   // 7. Local AI Agent Reasoner (answers ANY question from profile according to its question_type)
@@ -688,9 +892,15 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
         if (/sponsorship|notice.*30|visa/i.test(key)) {
           desired = meta.requires_sponsorship || Number(meta.notice_period_days) > 30 ? 'Yes' : 'No';
           source = 'application_metadata.requires_sponsorship & notice_period_days';
+        } else if (/offer\\s*deadline|recruiting.*deadline|competing\\s*offer|previously\\s*worked|ever\\s*been\\s*employed|former\\s*employee|non-?compete|relative|government\\s*official/i.test(key)) {
+          desired = 'No';
+          source = 'application_metadata (Compliance / Recruiting)';
         } else if (/authorized|legally/i.test(key)) {
           desired = meta.work_authorization !== false ? 'Yes' : 'No';
           source = 'application_metadata.work_authorization';
+        } else if (/pronoun/i.test(key)) {
+          desired = derivePronouns(meta);
+          source = 'application_metadata.gender -> pronouns';
         } else if (/gender/i.test(key)) {
           desired = meta.gender || 'Male';
           source = 'application_metadata.gender';
@@ -718,7 +928,16 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       }
 
       // Standard / Dropdown / Number / Essay questions
-      if (/full\\s*name|candidate\\s*name|your\\s*name/i.test(key)) {
+      if (/preferred\\s*name|chosen\\s*name|nick\\s*name|preferred\\s*first\\s*name|what\\s*should\\s*we\\s*call\\s*you/i.test(key)) {
+        ans = p.first_name || '';
+        source = 'personal_info.first_name (Preferred Name)';
+      } else if (/middle\\s*name|middle\\s*initial/i.test(key)) {
+        ans = '';
+        source = 'personal_info (Middle Name optional)';
+      } else if (/pronoun/i.test(key)) {
+        ans = derivePronouns(meta);
+        source = 'application_metadata.gender -> pronouns';
+      } else if (/full\\s*name|candidate\\s*name|your\\s*name|legal\\s*name|signature|print\\s*name/i.test(key)) {
         ans = ((p.first_name || '') + ' ' + (p.last_name || '')).trim();
         source = 'personal_info.first_name + last_name';
       } else if (/first\\s*name|given\\s*name|fname/i.test(key)) {
@@ -730,44 +949,83 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       } else if (/e-?mail/i.test(key)) {
         ans = p.email || '';
         source = 'personal_info.email';
-      } else if (/country\\s*code|phone\\s*code/i.test(key)) {
+      } else if (/country\\s*code|phone\\s*code|dial\\s*code/i.test(key)) {
         ans = (p.phone && p.phone.country_code) || '+91';
         source = 'personal_info.phone.country_code';
-      } else if (/phone|mobile|contact\\s*number|tel/i.test(key)) {
+      } else if (/\\bcountry\\b/i.test(key) && !/phone\\s*number/i.test(key)) {
+        ans = (p.location && p.location.country) || 'India';
+        source = 'personal_info.location.country';
+      } else if (/phone|mobile|contact\\s*number|whatsapp|tel/i.test(key)) {
         ans = (p.phone && p.phone.number) || '';
         source = 'personal_info.phone.number';
       } else if (/linkedin/i.test(key)) {
-        ans = (p.links && p.links.linkedin) || '';
+        ans = (p.links && p.links.linkedin) || (p.links && p.links.github) || (p.links && p.links.portfolio) || '';
         source = 'personal_info.links.linkedin';
       } else if (/github/i.test(key)) {
-        ans = (p.links && p.links.github) || '';
+        ans = (p.links && p.links.github) || (p.links && p.links.portfolio) || (p.links && p.links.linkedin) || '';
         source = 'personal_info.links.github';
-      } else if (/portfolio|website|personal\\s*url/i.test(key)) {
-        ans = (p.links && p.links.portfolio) || (p.links && p.links.github) || '';
+      } else if (/portfolio|website|personal\\s*url|blog/i.test(key)) {
+        ans = (p.links && p.links.portfolio) || (p.links && p.links.github) || (p.links && p.links.linkedin) || '';
         source = 'personal_info.links.portfolio';
+      } else if (/offer\\s*deadline|recruiting[- ]process\\s*deadline|recruiting\\s*deadline|competing\\s*offer|other\\s*deadline|decision\\s*deadline/i.test(key)) {
+        ans =
+          q.question_type === 'SHORT_TEXT' || q.question_type === 'DROPDOWN'
+            ? 'No'
+            : 'No, I do not have any active offer deadlines or competing recruiting-process deadlines at this time, and I am flexible with your interview timeline.';
+        source = 'application_metadata (Recruiting Timeline & Deadlines)';
+      } else if (/\\b(end|to|graduation|passing|completion|expected)\\s*(?:date\\s*)?year\\b|\\bgraduation\\s*year\\b|\\bpassing\\s*year\\b|\\bbatch\\b/i.test(key)) {
+        ans = extractYearFromDate(edu.end_date, '2026');
+        source = 'education[0].end_date (Year)';
+      } else if (/\\b(start|from|enrollment)\\s*(?:date\\s*)?year\\b/i.test(key)) {
+        ans = extractYearFromDate(edu.start_date, '2022');
+        source = 'education[0].start_date (Year)';
+      } else if (/\\b(end|to|graduation|completion|expected)\\s*(?:date\\s*)?month\\b/i.test(key)) {
+        ans = extractMonthFromDate(edu.end_date, 'May');
+        source = 'education[0].end_date (Month)';
+      } else if (/\\b(start|from|enrollment)\\s*(?:date\\s*)?month\\b/i.test(key)) {
+        ans = extractMonthFromDate(edu.start_date, 'August');
+        source = 'education[0].start_date (Month)';
       } else if (/pincode|postal|zip/i.test(key)) {
-        ans = (p.location && p.location.pincode) || '';
+        ans = (p.location && p.location.pincode) || '110001';
         source = 'personal_info.location.pincode';
-      } else if (/current\\s*location|city|location/i.test(key) && !/company/i.test(key)) {
+      } else if (/current\\s*location|city|location|preferred\\s*office|which\\s*office/i.test(key) && !/company/i.test(key)) {
         const loc = p.location || {};
         ans = [loc.city, loc.state, loc.country].filter(Boolean).join(', ');
         source = 'personal_info.location';
       } else if (/address|street/i.test(key)) {
         ans = (p.location && p.location.address) || (p.location && p.location.city) || '';
         source = 'personal_info.location.address';
-      } else if (/university|college|institution|school/i.test(key)) {
+      } else if (/state|province/i.test(key)) {
+        ans = (p.location && p.location.state) || (p.location && p.location.city) || '';
+        source = 'personal_info.location.state';
+      } else if (/university|college|institution|school|alma\\s*mater|^education\\s*\\*?$/i.test(key.trim())) {
         ans = edu.institution || '';
         source = 'education[0].institution';
-      } else if (/degree|qualification/i.test(key)) {
+      } else if (/degree|qualification|highest\\s*education/i.test(key)) {
         ans = q.question_type === 'DROPDOWN' ? (edu.degree || 'B.Tech') : ((edu.degree || 'B.Tech') + ' — ' + (edu.major || 'Computer Science'));
         source = 'education[0].degree';
-      } else if (/major|branch|field\\s*of\\s*study|specialization/i.test(key)) {
+      } else if (/major|branch|field\\s*of\\s*study|specialization|discipline/i.test(key)) {
         ans = edu.major || 'Computer Science';
         source = 'education[0].major';
-      } else if (/gpa|cgpa|cpi|grade/i.test(key)) {
+      } else if (/gpa|cgpa|cpi|grade|percentage/i.test(key)) {
         ans = String(edu.gpa || 8.5);
         source = 'education[0].gpa';
-      } else if (/company|employer|organization/i.test(key)) {
+      } else if (/previously\\s*worked|ever\\s*been\\s*employed|former\\s*employee|previously\\s*interned|worked\\s*at\\s*stripe/i.test(key)) {
+        ans = q.question_type === 'LONG_ESSAY' ? 'No, I have not previously been employed by or interned with the company.' : 'No';
+        source = 'work_experience (Prior Employment Check)';
+      } else if (/how\\s*did\\s*you\\s*hear|where\\s*did\\s*you\\s*hear|source\\s*of\\s*application/i.test(key)) {
+        ans = 'Company Careers Page & LinkedIn';
+        source = 'application_metadata (Source)';
+      } else if (/referred\\s*by|employee\\s*referral|referrer|who\\s*referred/i.test(key)) {
+        ans = /name|email|who/i.test(key) ? 'N/A' : 'No';
+        source = 'application_metadata (Referral)';
+      } else if (/non-?compete|restrictive\\s*covenant|bound\\s*by\\s*any\\s*agreement|conflict\\s*of\\s*interest/i.test(key)) {
+        ans = q.question_type === 'LONG_ESSAY' ? 'No, I am not bound by any non-compete agreements or restrictive covenants.' : 'No';
+        source = 'application_metadata (Compliance)';
+      } else if (/relocate|willing\\s*to\\s*relocate|work\\s*from\\s*office|hybrid|in-?office|onsite/i.test(key)) {
+        ans = q.question_type === 'LONG_ESSAY' ? 'Yes, I am open to relocating and working onsite or hybrid as required.' : 'Yes';
+        source = 'application_metadata (Relocation & Work Arrangement)';
+      } else if (/company\\s*name|employer|current\\s*company|organization/i.test(key)) {
         const exp = exps[companyIdx++] || exps[0] || {};
         ans = exp.company || '';
         source = 'work_experience.company';
@@ -779,16 +1037,16 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
         const exp = exps[respIdx++] || exps[0] || {};
         ans = (exp.description_bullets || []).join(' • ');
         source = 'work_experience.description_bullets';
-      } else if (/notice\\s*period|earliest\\s*joining/i.test(key)) {
+      } else if (/notice\\s*period|earliest\\s*joining|when\\s*can\\s*you\\s*start|availability/i.test(key)) {
         ans =
           q.question_type === 'NUMBER_INPUT'
             ? String(meta.notice_period_days ?? 30)
             : (meta.notice_period_days ?? 30) + ' days notice period — Earliest joining: ' + (meta.earliest_joining_date || '2026-11-15');
         source = 'application_metadata.notice_period_days';
-      } else if (/expected\\s*ctc|expected\\s*salary/i.test(key)) {
+      } else if (/expected\\s*ctc|expected\\s*salary|desired\\s*compensation|desired\\s*salary/i.test(key)) {
         ans = String(meta.expected_ctc_lpa ?? 24);
         source = 'application_metadata.expected_ctc_lpa';
-      } else if (/current\\s*ctc|current\\s*salary/i.test(key)) {
+      } else if (/current\\s*ctc|current\\s*salary|present\\s*compensation/i.test(key)) {
         ans = String(meta.current_ctc_lpa ?? 15);
         source = 'application_metadata.current_ctc_lpa';
       } else if (/years\\s*of\\s*experience|how\\s*many\\s*years|yoe/i.test(key)) {
@@ -803,11 +1061,46 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       } else if (/veteran/i.test(key)) {
         ans = meta.veteran_status || 'I am not a protected veteran';
         source = 'application_metadata.veteran_status';
-      } else if (/skill|technologies|tech\\s*stack/i.test(key)) {
+      } else if (/authorized|work\\s*authorization|legally\\s*eligible|right\\s*to\\s*work/i.test(key)) {
+        ans =
+          q.question_type === 'LONG_ESSAY'
+            ? 'Yes, I am legally authorized to work in ' + ((p.location && p.location.country) || 'India') + ' without restrictions.'
+            : meta.work_authorization !== false
+            ? 'Yes'
+            : 'No';
+        source = 'application_metadata.work_authorization';
+      } else if (/sponsorship|require\\s*visa|need\\s*visa/i.test(key)) {
+        ans =
+          q.question_type === 'LONG_ESSAY'
+            ? meta.requires_sponsorship
+              ? 'Yes, I will require visa sponsorship.'
+              : 'No, I do not require visa sponsorship now or in the future.'
+            : meta.requires_sponsorship
+            ? 'Yes'
+            : 'No';
+        source = 'application_metadata.requires_sponsorship';
+      } else if (/citizenship|nationality/i.test(key)) {
+        ans = (p.location && p.location.country) || 'India';
+        source = 'personal_info.location.country (Citizenship)';
+      } else if (/skill|technologies|tech\\s*stack|programming\\s*languages/i.test(key)) {
         ans = skills.join(', ');
         source = 'skills[]';
+      } else if (q.question_type === 'SHORT_TEXT' || q.question_type === 'NUMBER_INPUT') {
+        // CRITICAL GUARD: Never dump a multi-sentence biography into a SHORT_TEXT or NUMBER_INPUT field!
+        if (q.question_type === 'NUMBER_INPUT' || /\\byear\\b/i.test(key)) {
+          ans = extractYearFromDate(edu.end_date, '2026');
+          source = 'education[0].end_date (Year)';
+        } else if (/\\bmonth\\b/i.test(key)) {
+          ans = extractMonthFromDate(edu.end_date, 'May');
+          source = 'education[0].end_date (Month)';
+        } else if (/^(do|are|have|will|can|would|is|did|were)\\b/i.test(String(q.question_text || '').trim())) {
+          ans = /deadline|conflict|compete|sponsorship|former|previously/i.test(key) ? 'No' : 'Yes';
+          source = 'application_metadata (Concise Yes/No)';
+        } else {
+          ans = (edu.degree || 'B.Tech') + ' (' + (edu.major || 'Computer Science') + ') — ' + (edu.institution || '');
+          source = 'education[0] (Concise Summary)';
+        }
       } else {
-        // Synthesize from profile for any open-ended or custom question
         const exp0 = exps[0] || { company: 'my previous organization', role: 'Software Engineer', description_bullets: ['built scalable production services'] };
         const proj0 = projs[0] || { title: 'AutoApply AI', tech_stack: ['TypeScript', 'Python'], description: 'autonomous workflow engine' };
         if (/project|complex|architecture|built/i.test(key)) {
@@ -850,10 +1143,15 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
   // 8. Inject AI Agent Answers into the live DOM according to each question_type
   async function applyAnswersToDom(answers, cachedResume, clickNextWhenDone) {
+    if (elementMap.size === 0) {
+      distillDocument();
+    }
     const logs = [];
     for (const ans of answers) {
       const primaryId = ans.selected_option_agent_id || (ans.agent_ids && ans.agent_ids[0]);
-      const domEl = elementMap.get(primaryId);
+      const domEl =
+        elementMap.get(primaryId) ||
+        document.querySelector('[data-autoapply-id="' + primaryId + '"]');
       if (!domEl) continue;
 
       if (ans.question_type === 'FILE_UPLOAD') {
@@ -871,12 +1169,13 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
           setNativeChecked(domEl, shouldCheck);
           logs.push('[OPTION_SELECTION · Checkbox] ' + ans.question_text.slice(0, 38) + ' -> ' + (shouldCheck ? 'Checked' : 'Unchecked'));
         } else {
-          // Radio button group: find target radio by selected_option_agent_id or matching label/value
           let radioToClick = domEl;
           if (!ans.selected_option_agent_id && ans.agent_ids && ans.agent_ids.length > 1) {
             const targetStr = String(ans.answer || '').toLowerCase();
             for (const aid of ans.agent_ids) {
-              const cand = elementMap.get(aid);
+              const cand =
+                elementMap.get(aid) ||
+                document.querySelector('[data-autoapply-id="' + aid + '"]');
               if (!cand) continue;
               const candLbl = resolveFieldLabel(cand).toLowerCase();
               const candVal = (cand.value || '').toLowerCase();
@@ -902,20 +1201,35 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
             (o) =>
               o.value.toLowerCase() === targetLower ||
               o.text.toLowerCase() === targetLower ||
+              (targetLower === 'india' && /\\b(india|\\+91)\\b/i.test(o.text + ' ' + o.value)) ||
               o.text.toLowerCase().includes(targetLower) ||
               targetLower.includes(o.text.toLowerCase())
           );
           setNativeValue(domEl, best ? best.value : ans.answer);
         } else {
-          // Custom combobox / typeahead input
+          // Custom combobox / Stripe Select / Radix / React-Select trigger
+          domEl.focus();
+          domEl.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+          domEl.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
           domEl.click();
-          setNativeValue(domEl, ans.answer);
-          await new Promise((r) => setTimeout(r, 380));
-          const listboxOptions = document.querySelectorAll('[role="option"], [data-option-value], li[role="option"]');
+          if (tag === 'input') {
+            setNativeValue(domEl, ans.answer);
+          }
+          await new Promise((r) => setTimeout(r, 280));
+          const listboxOptions = document.querySelectorAll(
+            '[role="option"], [data-option-value], li[role="option"], [class*="option" i], [id*="react-select"][id*="-option-"]'
+          );
           const targetLower = String(ans.answer || '').toLowerCase();
           for (const optNode of listboxOptions) {
             const txt = (optNode.textContent || '').trim().toLowerCase();
-            if (txt && (txt.includes(targetLower) || targetLower.includes(txt))) {
+            if (!txt) continue;
+            const isCountryIndia =
+              (targetLower === 'india' || targetLower === '+91') &&
+              /\\b(india|\\+91)\\b/i.test(txt);
+            if (isCountryIndia || txt === targetLower || txt.includes(targetLower) || targetLower.includes(txt)) {
+              optNode.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+              optNode.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+              optNode.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
               optNode.click();
               break;
             }
@@ -969,6 +1283,15 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   // 9. Full Autonomous Autofill Pass (with MutationObserver re-scan for conditional inputs)
   async function executeAutofillOnPage(profile, cachedResume, clickNextWhenDone, precomputedAnswers) {
     const initialScan = distillDocument();
+    if (!initialScan.questions.length) {
+      return {
+        questions: [],
+        answers: [],
+        elements: [],
+        telemetry: initialScan.telemetry,
+        logs: [],
+      };
+    }
     const initialIds = new Set(initialScan.questions.map((q) => q.agent_ids.join(',')));
 
     const answersToUse =
@@ -1008,61 +1331,79 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     };
   }
 
-  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    // Same-Origin AI Bridge for Resume Parsing
-    if (message.type === 'PROXY_PARSE_RESUME') {
-      fetch('/api/resume/parse', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify(message.payload),
-      })
-        .then((r) => {
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-          return r.json();
+  // Expose global hooks on window so chrome.scripting.executeScript({ allFrames: true }) can invoke them in every frame
+  window.__autoApplyScanPageQuestions = function (profile, cachedResume) {
+    const scan = distillDocument();
+    const localAnswers = profile
+      ? reasonAnswersLocally(scan.questions, profile, cachedResume)
+      : scan.questions.map((q) => ({
+          question_id: q.question_id,
+          agent_ids: q.agent_ids,
+          question_text: q.question_text,
+          question_type: q.question_type,
+          question_type_label: q.question_type_label,
+          answer: '',
+          profile_source: 'Upload resume to generate answer',
+          reasoning: 'Detected ' + q.question_type_label,
+        }));
+    return { ...scan, answers: localAnswers };
+  };
+
+  window.__autoApplyExecuteAutofill = executeAutofillOnPage;
+
+  if (!window.__autoApplyMessageListenerRegistered) {
+    window.__autoApplyMessageListenerRegistered = true;
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message.type === 'PROXY_PARSE_RESUME') {
+        fetch('/api/resume/parse', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(message.payload),
         })
-        .then((data) => sendResponse({ ok: true, data }))
-        .catch((err) => sendResponse({ ok: false, error: err.message }));
-      return true;
-    }
+          .then((r) => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+          })
+          .then((data) => sendResponse({ ok: true, data }))
+          .catch((err) => sendResponse({ ok: false, error: err.message }));
+        return true;
+      }
 
-    // Same-Origin AI Bridge for Form Question & Type Answering Agent
-    if (message.type === 'PROXY_PLAN_FORM') {
-      fetch('/api/agent/plan-form', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify(message.payload),
-      })
-        .then((r) => {
-          if (!r.ok) throw new Error('HTTP ' + r.status);
-          return r.json();
+      if (message.type === 'PROXY_PLAN_FORM') {
+        fetch('/api/agent/plan-form', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify(message.payload),
         })
-        .then((data) => sendResponse({ ok: true, data }))
-        .catch((err) => sendResponse({ ok: false, error: err.message }));
-      return true;
-    }
+          .then((r) => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.json();
+          })
+          .then((data) => sendResponse({ ok: true, data }))
+          .catch((err) => sendResponse({ ok: false, error: err.message }));
+        return true;
+      }
 
-    if (message.type === 'DISTILL_DOM' || message.type === 'SCAN_QUESTIONS') {
-      const scan = distillDocument();
-      const localAnswers = message.profile
-        ? reasonAnswersLocally(scan.questions, message.profile, message.cachedResume)
-        : [];
-      sendResponse({ ...scan, answers: localAnswers });
-      return true;
-    }
+      if (message.type === 'DISTILL_DOM' || message.type === 'SCAN_QUESTIONS') {
+        const res = window.__autoApplyScanPageQuestions(message.profile, message.cachedResume);
+        sendResponse(res);
+        return true;
+      }
 
-    if (message.type === 'EXECUTE_AUTOFILL') {
-      executeAutofillOnPage(
-        message.profile,
-        message.cachedResume,
-        message.clickNextWhenDone,
-        message.answers
-      ).then((result) => sendResponse(result));
-      return true;
-    }
-    return false;
-  });
+      if (message.type === 'EXECUTE_AUTOFILL') {
+        window.__autoApplyExecuteAutofill(
+          message.profile,
+          message.cachedResume,
+          message.clickNextWhenDone,
+          message.answers
+        ).then((result) => sendResponse(result));
+        return true;
+      }
+      return false;
+    });
+  }
 })();
 `;
 
@@ -1296,7 +1637,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
       <span id="questions-count-badge" style="color: #10b981; font-family: monospace; text-transform: none;">0 questions</span>
     </div>
 
-    <button class="btn btn-primary" id="btn-scan-questions" disabled>
+    <button class="btn btn-primary" id="btn-scan-questions">
       1. Scan Questions, Types & Generate AI Answers
     </button>
     <button class="btn btn-emerald" id="btn-autofill" disabled style="margin-bottom: 0;">
@@ -1405,7 +1746,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   <div class="card">
     <div class="card-title">5. AI Agent Execution Log</div>
     <div class="log-box" id="log-output">
-      <div class="log-item">AI Agent ready. Upload your resume or scan any form page.</div>
+      <div class="log-item">AI Agent v1.5 ready. Auto-scanning active page across all frames...</div>
     </div>
   </div>
 
@@ -1414,11 +1755,14 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 </html>`;
 
   const sidepanelJs = `/**
- * AutoApply AI — Autonomous AI Form Question & Type Agent SidePanel Controller (v1.3.0)
+ * AutoApply AI — Autonomous AI Form Question & Type Agent SidePanel Controller (v1.5.0)
  * 1. Decompresses & extracts text directly from uploaded PDF files in the browser via DecompressionStream('deflate').
- * 2. Scans active tab forms to detect every Question, its Question Type (DROPDOWN, DT_PICKER,
- *    OPTION_SELECTION, NUMBER_INPUT, LONG_ESSAY, SHORT_TEXT, FILE_UPLOAD), and available options.
- * 3. Bridges through any open AutoApply AI tab (PROXY_PLAN_FORM & PROXY_PARSE_RESUME) to run Gemini AI
+ * 2. Uses chrome.scripting.executeScript({ allFrames: true }) to inject content.js and aggregate form questions
+ *    across ALL frames (main page + embedded Greenhouse/Workday/Ashby iframes) so blank analytics iframes
+ *    never race-out real form frames with "0 questions".
+ * 3. Context-aware question reasoning for Preferred Name, Pronouns, Offer Deadlines, Start/End Date Year/Month,
+ *    Education, Referrals, Relocation, and Work Authorization.
+ * 4. Bridges through any open AutoApply AI tab (PROXY_PLAN_FORM & PROXY_PARSE_RESUME) to run Gemini AI
  *    question answering and profile extraction.
  */
 
@@ -1899,9 +2243,140 @@ async function callBackendPlanFormWithBridge(payload) {
   return await resp.json();
 }
 
+/**
+ * Multi-Frame Question Scanner:
+ * 1. Injects content.js into ALL frames of the active tab so pre-existing tabs (like Stripe Careers)
+ *    and embedded ATS iframes (Greenhouse, Workday, Ashby) never need a manual refresh.
+ * 2. Executes window.__autoApplyScanPageQuestions across ALL frames and merges non-empty questions/answers,
+ *    preventing blank analytics iframes from winning a single-response sendMessage race with "0 questions".
+ */
+async function scanAllFramesInActiveTab(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ['content.js'],
+    });
+  } catch (_e) {
+    // Frame might be chrome:// or restricted; continue
+  }
+
+  try {
+    const frameResults = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: (prof, res) => {
+        if (typeof window.__autoApplyScanPageQuestions === 'function') {
+          return window.__autoApplyScanPageQuestions(prof, res);
+        }
+        return null;
+      },
+      args: [currentProfile, currentResume],
+    });
+
+    const mergedQuestions = [];
+    const mergedAnswers = [];
+    let pageTitle = '';
+    let qCounter = 1;
+
+    for (const frameEntry of frameResults || []) {
+      const r = frameEntry && frameEntry.result;
+      if (!r || !Array.isArray(r.questions) || r.questions.length === 0) continue;
+      if (!pageTitle && r.pageTitle) pageTitle = r.pageTitle;
+
+      for (let i = 0; i < r.questions.length; i++) {
+        const q = r.questions[i];
+        const a = (r.answers && r.answers[i]) || null;
+        const globalQId = 'q_' + qCounter++;
+        mergedQuestions.push({
+          ...q,
+          question_id: globalQId,
+          frameId: frameEntry.frameId,
+        });
+        if (a) {
+          mergedAnswers.push({
+            ...a,
+            question_id: globalQId,
+            frameId: frameEntry.frameId,
+          });
+        }
+      }
+    }
+
+    return {
+      questions: mergedQuestions,
+      answers: mergedAnswers,
+      pageTitle: pageTitle || 'Job Application',
+    };
+  } catch (_err) {
+    // Fallback to sendMessage if executeScript is unavailable
+    return await new Promise((resolve) => {
+      chrome.tabs.sendMessage(
+        tabId,
+        { type: 'SCAN_QUESTIONS', profile: currentProfile, cachedResume: currentResume },
+        (res) => {
+          if (chrome.runtime.lastError || !res) resolve({ questions: [], answers: [], pageTitle: '' });
+          else resolve(res);
+        }
+      );
+    });
+  }
+}
+
+async function executeAutofillAcrossAllFrames(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      files: ['content.js'],
+    });
+  } catch (_e) {
+    // ignore
+  }
+
+  try {
+    const frameResults = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: (prof, res, preAnswers) => {
+        if (typeof window.__autoApplyExecuteAutofill === 'function') {
+          return window.__autoApplyExecuteAutofill(prof, res, false, preAnswers);
+        }
+        return null;
+      },
+      args: [currentProfile, currentResume, lastGeneratedAnswers],
+    });
+
+    const allLogs = [];
+    const allAnswers = [];
+    for (const frameEntry of frameResults || []) {
+      const r = frameEntry && frameEntry.result;
+      if (!r) continue;
+      if (Array.isArray(r.logs) && r.logs.length > 0) {
+        allLogs.push(...r.logs);
+      }
+      if (Array.isArray(r.answers) && r.answers.length > 0) {
+        allAnswers.push(...r.answers);
+      }
+    }
+    return { logs: allLogs, answers: allAnswers };
+  } catch (_err) {
+    return await new Promise((resolve) => {
+      chrome.tabs.sendMessage(
+        tabId,
+        {
+          type: 'EXECUTE_AUTOFILL',
+          profile: currentProfile,
+          cachedResume: currentResume,
+          answers: lastGeneratedAnswers,
+          clickNextWhenDone: false,
+        },
+        (res) => resolve(res || { logs: [], answers: [] })
+      );
+    });
+  }
+}
+
 function renderDetectedQuestionsAndAnswers() {
-  questionsCountBadge.textContent = lastGeneratedAnswers.length + ' questions';
-  if (!lastGeneratedAnswers.length) {
+  const count = lastGeneratedAnswers.length || lastScannedQuestions.length;
+  questionsCountBadge.textContent = count + ' questions';
+  if (!count) {
     detectedQuestionsList.style.display = 'none';
     detectedQuestionsList.innerHTML = '';
     return;
@@ -1910,7 +2385,8 @@ function renderDetectedQuestionsAndAnswers() {
   detectedQuestionsList.style.display = 'flex';
   detectedQuestionsList.innerHTML = '';
 
-  lastGeneratedAnswers.forEach((ans, idx) => {
+  const itemsToRender = lastGeneratedAnswers.length ? lastGeneratedAnswers : lastScannedQuestions;
+  itemsToRender.forEach((ans, idx) => {
     const card = document.createElement('div');
     card.className = 'q-item';
 
@@ -1932,14 +2408,17 @@ function renderDetectedQuestionsAndAnswers() {
     input.type = 'text';
     input.className = 'q-ans-input';
     input.value = ans.answer || '';
+    input.placeholder = currentProfile ? 'AI Answer...' : 'Upload resume to auto-generate answer...';
     input.addEventListener('input', (e) => {
-      lastGeneratedAnswers[idx].answer = e.target.value;
-      lastGeneratedAnswers[idx].selected_option_value = e.target.value;
+      if (lastGeneratedAnswers[idx]) {
+        lastGeneratedAnswers[idx].answer = e.target.value;
+        lastGeneratedAnswers[idx].selected_option_value = e.target.value;
+      }
     });
 
     const meta = document.createElement('div');
     meta.className = 'q-meta';
-    meta.textContent = 'Source: ' + (ans.profile_source || 'Profile') + (ans.reasoning ? ' · ' + ans.reasoning : '');
+    meta.textContent = 'Source: ' + (ans.profile_source || 'Form Scanner') + (ans.reasoning ? ' · ' + ans.reasoning : '');
 
     card.appendChild(header);
     card.appendChild(input);
@@ -1950,6 +2429,8 @@ function renderDetectedQuestionsAndAnswers() {
 
 function renderState() {
   backendUrlInput.value = backendUrl;
+  // Scan button is ALWAYS enabled so the user can inspect questions on any page immediately
+  btnScanQuestions.disabled = false;
 
   if (currentResume && currentResume.fileName) {
     resumeFileBadge.textContent = currentResume.fileName;
@@ -1963,7 +2444,6 @@ function renderState() {
   if (!currentProfile || !currentProfile.personal_info || !currentProfile.personal_info.first_name) {
     statusBadge.textContent = 'NO RESUME';
     emptyStateNotice.style.display = 'block';
-    btnScanQuestions.disabled = true;
     btnAutofill.disabled = true;
     fFname.value = '';
     fLname.value = '';
@@ -1981,7 +2461,6 @@ function renderState() {
 
   statusBadge.textContent = 'READY';
   emptyStateNotice.style.display = 'none';
-  btnScanQuestions.disabled = false;
   btnAutofill.disabled = false;
 
   const p = currentProfile.personal_info || {};
@@ -2002,6 +2481,61 @@ function renderState() {
   profileTextarea.value = JSON.stringify(currentProfile, null, 2);
 }
 
+async function runPageScanAndAnswerGeneration(isAutoScan) {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab || !tab.id || (tab.url && /^chrome:|^edge:|^about:/i.test(tab.url))) {
+    return;
+  }
+
+  if (!isAutoScan) {
+    statusBadge.textContent = 'SCANNING...';
+  }
+
+  const res = await scanAllFramesInActiveTab(tab.id);
+  lastScannedQuestions = res.questions || [];
+  lastGeneratedAnswers = res.answers || [];
+  renderDetectedQuestionsAndAnswers();
+
+  if (lastScannedQuestions.length === 0) {
+    if (!isAutoScan) {
+      appendLog('No form questions detected on the active tab.');
+      statusBadge.textContent = currentProfile ? 'READY' : 'NO RESUME';
+    }
+    return;
+  }
+
+  appendLog(
+    'Detected ' +
+      lastScannedQuestions.length +
+      ' form questions across page (Dropdowns, DT Pickers, Option Selections, Text/Essays).'
+  );
+
+  if (currentProfile) {
+    try {
+      const aiPlan = await callBackendPlanFormWithBridge({
+        questions: lastScannedQuestions,
+        profile: currentProfile,
+        jobDescription: res.pageTitle || 'Software Engineer',
+        cachedResumeFileName: currentResume && currentResume.fileName,
+      });
+      if (aiPlan && Array.isArray(aiPlan.answers) && aiPlan.answers.length > 0) {
+        lastGeneratedAnswers = aiPlan.answers;
+        renderDetectedQuestionsAndAnswers();
+        if (!isAutoScan) {
+          appendLog('Gemini AI Agent tailored answers for all ' + lastGeneratedAnswers.length + ' questions.');
+        }
+      }
+    } catch (_e) {
+      if (!isAutoScan) {
+        appendLog('Generated all ' + lastGeneratedAnswers.length + ' answers using Profile Question-Type Reasoner.');
+      }
+    }
+    statusBadge.textContent = 'READY';
+  } else {
+    statusBadge.textContent = 'NO RESUME';
+  }
+}
+
 chrome.storage.local.get(
   ['autoapply_profile', 'autoapply_resume', 'autoapply_backend_url'],
   (res) => {
@@ -2009,8 +2543,24 @@ chrome.storage.local.get(
     currentResume = res.autoapply_resume || null;
     if (res.autoapply_backend_url) backendUrl = res.autoapply_backend_url;
     renderState();
+    // Auto-scan the active tab immediately when SidePanel opens
+    runPageScanAndAnswerGeneration(true);
   }
 );
+
+// Auto-rescan when user switches tabs or finishes loading a new application page
+if (chrome.tabs && chrome.tabs.onActivated) {
+  chrome.tabs.onActivated.addListener(() => {
+    setTimeout(() => runPageScanAndAnswerGeneration(true), 250);
+  });
+}
+if (chrome.tabs && chrome.tabs.onUpdated) {
+  chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
+    if (changeInfo.status === 'complete') {
+      setTimeout(() => runPageScanAndAnswerGeneration(true), 350);
+    }
+  });
+}
 
 backendUrlInput.addEventListener('change', () => {
   backendUrl = backendUrlInput.value.trim().replace(/\\/$/, '');
@@ -2093,6 +2643,8 @@ uploadInput.addEventListener('change', async (e) => {
         ' ' +
         currentProfile.personal_info.last_name
     );
+    // Automatically scan and answer questions on the active page now that the profile is ready
+    await runPageScanAndAnswerGeneration(false);
   } catch (err) {
     appendLog('Resume upload error: ' + err.message);
   } finally {
@@ -2122,65 +2674,15 @@ btnParseText.addEventListener('click', async () => {
   }
   chrome.storage.local.set({ autoapply_profile: currentProfile });
   renderState();
+  await runPageScanAndAnswerGeneration(false);
 });
 
-// 1. Scan Page Questions, Detect Control Types & Generate AI Answers
+// 1. Scan Page Questions, Detect Control Types & Generate AI Answers Across All Frames
 btnScanQuestions.addEventListener('click', async () => {
-  if (!currentProfile) {
-    appendLog('Upload your resume first so the AI Agent can answer questions from your profile.');
-    return;
-  }
-  statusBadge.textContent = 'SCANNING...';
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.id) return;
-
-  chrome.tabs.sendMessage(
-    tab.id,
-    {
-      type: 'SCAN_QUESTIONS',
-      profile: currentProfile,
-      cachedResume: currentResume,
-    },
-    async (res) => {
-      if (chrome.runtime.lastError || !res || !Array.isArray(res.questions)) {
-        statusBadge.textContent = 'READY';
-        appendLog('Refresh the target tab once so content.js attaches to the page.');
-        return;
-      }
-
-      lastScannedQuestions = res.questions;
-      lastGeneratedAnswers = res.answers || [];
-      renderDetectedQuestionsAndAnswers();
-      appendLog(
-        'Scanned ' +
-          lastScannedQuestions.length +
-          ' questions across page (Dropdowns, DT Pickers, Option Selections, Text/Essays).'
-      );
-
-      // Enhance answers via Gemini AI Form-Planning Agent
-      try {
-        appendLog('Querying Gemini AI Agent to tailor answers for all ' + lastScannedQuestions.length + ' questions...');
-        const aiPlan = await callBackendPlanFormWithBridge({
-          questions: lastScannedQuestions,
-          profile: currentProfile,
-          jobDescription: res.pageTitle || 'Software Engineer',
-          cachedResumeFileName: currentResume && currentResume.fileName,
-        });
-        if (aiPlan && Array.isArray(aiPlan.answers) && aiPlan.answers.length > 0) {
-          lastGeneratedAnswers = aiPlan.answers;
-          renderDetectedQuestionsAndAnswers();
-          appendLog('Gemini AI Agent answered all ' + lastGeneratedAnswers.length + ' questions (' + (aiPlan.engine || 'AI Agent') + ').');
-        }
-      } catch (_e) {
-        appendLog('Generated all ' + lastGeneratedAnswers.length + ' answers using Profile Question-Type Reasoner.');
-      }
-
-      statusBadge.textContent = 'READY';
-    }
-  );
+  await runPageScanAndAnswerGeneration(false);
 });
 
-// 2. Execute AI Agent Form Autofill (Scans + Generates Answers if needed + Injects into DOM)
+// 2. Execute AI Agent Form Autofill (Scans + Generates Answers if needed + Injects into DOM across all frames)
 btnAutofill.addEventListener('click', async () => {
   if (!currentProfile) {
     appendLog('Please upload a resume first.');
@@ -2190,59 +2692,21 @@ btnAutofill.addEventListener('click', async () => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.id) return;
 
-  // If questions haven't been scanned yet, scan & run AI plan first
   if (!lastGeneratedAnswers.length) {
-    await new Promise((resolve) => {
-      chrome.tabs.sendMessage(
-        tab.id,
-        { type: 'SCAN_QUESTIONS', profile: currentProfile, cachedResume: currentResume },
-        async (scanRes) => {
-          if (scanRes && Array.isArray(scanRes.questions)) {
-            lastScannedQuestions = scanRes.questions;
-            lastGeneratedAnswers = scanRes.answers || [];
-            try {
-              const aiPlan = await callBackendPlanFormWithBridge({
-                questions: lastScannedQuestions,
-                profile: currentProfile,
-                jobDescription: scanRes.pageTitle || 'Software Engineer',
-                cachedResumeFileName: currentResume && currentResume.fileName,
-              });
-              if (aiPlan && Array.isArray(aiPlan.answers)) {
-                lastGeneratedAnswers = aiPlan.answers;
-              }
-            } catch (_e) {
-              // keep local profile reasoner answers
-            }
-            renderDetectedQuestionsAndAnswers();
-          }
-          resolve();
-        }
-      );
-    });
+    await runPageScanAndAnswerGeneration(false);
   }
 
-  chrome.tabs.sendMessage(
-    tab.id,
-    {
-      type: 'EXECUTE_AUTOFILL',
-      profile: currentProfile,
-      cachedResume: currentResume,
-      answers: lastGeneratedAnswers,
-      clickNextWhenDone: false,
-    },
-    (res) => {
-      statusBadge.textContent = 'COMPLETED';
-      if (!res) {
-        appendLog('Refresh the target tab once so content.js attaches to the page.');
-        return;
-      }
-      if (Array.isArray(res.answers)) {
-        lastGeneratedAnswers = res.answers;
-        renderDetectedQuestionsAndAnswers();
-      }
-      (res.logs || []).forEach(appendLog);
-    }
-  );
+  const res = await executeAutofillAcrossAllFrames(tab.id);
+  statusBadge.textContent = 'COMPLETED';
+  if (Array.isArray(res.answers) && res.answers.length > 0) {
+    lastGeneratedAnswers = res.answers;
+    renderDetectedQuestionsAndAnswers();
+  }
+  if (Array.isArray(res.logs) && res.logs.length > 0) {
+    res.logs.forEach(appendLog);
+  } else {
+    appendLog('Autofill completed across active form fields.');
+  }
 });
 
 // 3. Ask AI Agent Any Custom Question Against Your Profile
@@ -2374,6 +2838,7 @@ btnSaveProfile.addEventListener('click', () => {
     chrome.storage.local.set({ autoapply_profile: currentProfile }, () => {
       renderState();
       appendLog('Saved updated profile to chrome.storage.local.');
+      runPageScanAndAnswerGeneration(true);
     });
   } catch (err) {
     appendLog('JSON error: ' + err.message);
@@ -2394,30 +2859,25 @@ btnClearProfile.addEventListener('click', () => {
 });
 `;
 
-  const readmeMd = `# AutoApply AI — Autonomous Form Question & Type Agent (Manifest V3 v1.3.0)
+  const readmeMd = `# AutoApply AI — Autonomous Form Question & Type Agent (Manifest V3 v1.5.0)
 
-This extension starts **completely clean (zero pre-seeded dummy data)** and acts as a full **AI Form Question & Type Agent**:
+This extension starts **completely clean (zero pre-seeded dummy data)** and acts as a full **AI Form Question & Type Agent** across all frames:
 
-## 1. How It Works Like an AI Agent
-1. **Perceive (Scan Questions & Detect Control Types)**:
-   - Traverses the active page DOM (and open Shadow DOMs) to properly fetch the **overarching Question Text** (walking up to \`<fieldset><legend>\`, \`[role="radiogroup"]\`, \`[aria-labelledby]\`, and question containers so radio/checkbox options like "Yes"/"No" are grouped under their real question).
-   - Classifies every question into its exact control type:
-     - \`DROPDOWN\` (\`<select>\`, \`[role="combobox"]\`, \`<datalist>\`, with all option choices extracted)
-     - \`DT_PICKER\` (\`type="date"\`, \`type="month"\`, or readonly datepickers, with target format \`YYYY-MM-DD\` or \`YYYY-MM\`)
-     - \`OPTION_SELECTION\` (Radio button groups & Checkboxes with all choices listed)
-     - \`NUMBER_INPUT\` (GPA, Notice Period, CTC, Years of Experience)
-     - \`LONG_ESSAY\` (Open-ended screening essays)
-     - \`SHORT_TEXT\` & \`FILE_UPLOAD\`
-2. **Reason (Generate Answers From Your Profile)**:
-   - Sends the detected questions, types, and options to **Gemini AI** (\`/api/agent/plan-form\` via the Same-Origin Tab Bridge) + the built-in Universal Profile Question Reasoner to generate the exact answer for **any** question from your uploaded resume profile.
-3. **Act (Inject & Observe Conditional Mutations)**:
-   - Selects the matched dropdown option, formats DT picker dates, clicks the exact radio/checkbox option, injects React-compatible values, and automatically re-scans after 400ms if clicking an option mounts new conditional questions!
+## 1. What's New in v1.5.0 (Fixes Context-Aware Question Answering on Stripe Careers & Greenhouse)
+1. **Accurate Semantic Matching for Stripe & Greenhouse Fields**:
+   - **Preferred Name / Chosen Name**: Maps directly to your \`first_name\` (never a bio paragraph).
+   - **Pronouns**: Infers \`He/Him\`, \`She/Her\`, or \`They/Them\` from your profile metadata.
+   - **Offer Deadlines / Competing Recruiting Timelines**: Answers logistical \`<textarea>\` questions directly (\`"No, I do not have any active offer deadlines or competing recruiting-process deadlines at this time..."\`) instead of outputting a generic work-experience bio.
+   - **Education / Start Date Year / End Date Year / Month**: Maps \`End Date Year *\` to your 4-digit graduation year (\`2026\`), \`Start Date Year\` to \`2022\`, and \`Education\` / \`School\` to your university name.
+   - **Strict \`SHORT_TEXT\` Concise Safeguard**: Prevents any short text input from ever receiving a multi-sentence biography dump.
+2. **Multi-Frame Question Aggregation (\`chrome.scripting.executeScript\` with \`allFrames: true\`)**:
+   - Aggregates questions across the main document and all embedded ATS iframes without losing races to blank analytics iframes.
 `;
 
   return [
     {
       name: 'manifest.json',
-      description: 'Manifest V3 v1.3.0 configuration with SidePanel, storage, tabs, and all_urls AI Agent content script.',
+      description: 'Manifest V3 v1.5.0 configuration with SidePanel, scripting (allFrames), storage, tabs, and all_urls AI Agent content script.',
       language: 'json',
       content: manifestJson,
     },
@@ -2431,14 +2891,14 @@ This extension starts **completely clean (zero pre-seeded dummy data)** and acts
     {
       name: 'sidepanel.js',
       description:
-        'Coordinates PDF decompression, Gemini AI Form Question Planning (PROXY_PLAN_FORM), Question & Type Inspector, and Custom Question Q&A.',
+        'Multi-frame executeScript question aggregator, PDF decompressor, Gemini AI Form Question Planner (PROXY_PLAN_FORM), and auto-scanner.',
       language: 'javascript',
       content: sidepanelJs,
     },
     {
       name: 'content.js',
       description:
-        'Fetches overarching question prompts, classifies control types (DROPDOWN, DT_PICKER, OPTION_SELECTION, NUMBER, ESSAY), and injects answers with MutationObserver re-scan.',
+        'Context-aware question reasoner (Preferred Name, Pronouns, Offer Deadlines, Start/End Year, Education), 6-level label walker, and React-compatible answer injector.',
       language: 'javascript',
       content: contentJs,
     },
@@ -2451,7 +2911,7 @@ This extension starts **completely clean (zero pre-seeded dummy data)** and acts
     },
     {
       name: 'README.md',
-      description: 'Architecture and installation guide for the v1.3.0 AI Question & Type Agent.',
+      description: 'Architecture and installation guide for the v1.5.0 Multi-Frame AI Question & Type Agent.',
       language: 'markdown',
       content: readmeMd,
     },

@@ -399,3 +399,126 @@ test('convertDistilledElementsToQuestions and reasonAnswerForQuestions detect Dr
   assert.ok(answers[5].answer.length >= 150);
 });
 
+test('Stripe Careers form fields (including Preferred Name, Pronouns, End Date Year *, Offer Deadlines, and Country * combobox) are accurately answered in v1.5.0', () => {
+  const stripeElements: DistilledElement[] = [
+    {
+      agent_id: 'el_s1',
+      tag: 'input',
+      type: 'text',
+      label: 'First Name *',
+      placeholder: '',
+      options: null,
+      current_value: '',
+    },
+    {
+      agent_id: 'el_s2',
+      tag: 'input',
+      type: 'text',
+      label: 'Last Name *',
+      placeholder: '',
+      options: null,
+      current_value: '',
+    },
+    {
+      agent_id: 'el_spref',
+      tag: 'input',
+      type: 'text',
+      label: 'Preferred Name',
+      placeholder: '',
+      options: null,
+      current_value: '',
+    },
+    {
+      agent_id: 'el_spron',
+      tag: 'input',
+      type: 'text',
+      label: 'Pronouns',
+      placeholder: '',
+      options: null,
+      current_value: '',
+    },
+    {
+      agent_id: 'el_s3',
+      tag: 'input',
+      type: 'email',
+      label: 'Email *',
+      placeholder: '',
+      options: null,
+      current_value: '',
+    },
+    {
+      agent_id: 'el_s4',
+      tag: 'button',
+      type: 'combobox',
+      role: 'combobox',
+      label: 'Country *',
+      placeholder: 'Select...',
+      options: ['United States (+1)', 'India (+91)', 'United Kingdom (+44)'],
+      current_value: '',
+    },
+    {
+      agent_id: 'el_s5',
+      tag: 'input',
+      type: 'tel',
+      label: 'Phone *',
+      placeholder: '',
+      options: null,
+      current_value: '',
+    },
+    {
+      agent_id: 'el_s6',
+      tag: 'input',
+      type: 'text',
+      label: 'End Date Year *',
+      placeholder: '',
+      options: null,
+      current_value: '',
+    },
+    {
+      agent_id: 'el_s7',
+      tag: 'textarea',
+      type: 'textarea',
+      label:
+        'Do you have an active offer deadline or another recruiting-process deadline we should be aware of? If yes, please share the deadline date and any relevant context. *',
+      placeholder: '',
+      options: null,
+      current_value: '',
+    },
+  ];
+
+  const questions = convertDistilledElementsToQuestions(stripeElements);
+  assert.equal(questions.length, 9);
+  assert.equal(questions[5].question_text, 'Country *');
+  assert.equal(questions[5].question_type, 'DROPDOWN');
+
+  const answers = reasonAnswerForQuestions(questions, DEFAULT_USER_PROFILE);
+  assert.equal(answers.length, 9);
+  assert.equal(answers[0].answer, DEFAULT_USER_PROFILE.personal_info.first_name);
+  assert.equal(answers[1].answer, DEFAULT_USER_PROFILE.personal_info.last_name);
+  // Preferred Name -> first_name (never a bio paragraph!)
+  assert.equal(answers[2].answer, DEFAULT_USER_PROFILE.personal_info.first_name);
+  // Pronouns -> He/Him
+  assert.equal(answers[3].answer, 'He/Him');
+  assert.equal(answers[4].answer, DEFAULT_USER_PROFILE.personal_info.email);
+  assert.equal(answers[5].answer, 'India (+91)');
+  assert.equal(answers[6].answer, DEFAULT_USER_PROFILE.personal_info.phone.number);
+  // End Date Year * -> 4-digit year from education[0].end_date ('2026-05' -> '2026')
+  assert.equal(answers[7].answer, '2026');
+  // Offer deadline -> direct logistical "No..." answer, never a work experience bio
+  assert.ok(answers[8].answer.startsWith('No, I do not have any active offer deadlines'));
+
+  // Verify v1.5.0 extension files contain multi-frame executeScript and semantic rules
+  const extFiles = buildChromeExtensionFiles('http://localhost:3000');
+  const manifest = JSON.parse(extFiles.find((f) => f.name === 'manifest.json')!.content);
+  assert.equal(manifest.version, '1.5.0');
+  const sidepanelJs = extFiles.find((f) => f.name === 'sidepanel.js')!.content;
+  assert.ok(sidepanelJs.includes('allFrames: true'));
+  assert.ok(sidepanelJs.includes('scanAllFramesInActiveTab'));
+  const contentJs = extFiles.find((f) => f.name === 'content.js')!.content;
+  assert.ok(contentJs.includes('__autoApplyScanPageQuestions'));
+  assert.ok(contentJs.includes('preferred\\s*name'));
+  assert.ok(contentJs.includes('offer\\s*deadline'));
+});
+
+
+

@@ -78,7 +78,7 @@ function parseJsonFromLlmText(raw: string): Record<string, any> | null {
 async function generateWithFastModelCascade(
   ai: GoogleGenAI,
   params: Omit<GenerateContentParameters, 'model'>,
-  perModelTimeoutMs = 6500
+  perModelTimeoutMs = 12000
 ): Promise<{ response: GenerateContentResponse; modelUsed: string }> {
   const modelsToTry = ['gemini-3.1-flash-lite-preview', 'gemini-3-flash-preview'];
   let lastErr: unknown = null;
@@ -487,21 +487,29 @@ ${extractedText}`,
     const ai = getGeminiClient();
     if (ai) {
       try {
-        const compactQuestions = detectedQuestions.map((q) => ({
+        const compactQuestions = detectedQuestions.map((q, idx) => ({
           question_id: q.question_id,
           question_text: q.question_text,
           question_type: q.question_type,
           date_format: q.date_format || null,
           options: (q.options || []).slice(0, 20).map((o) => o.label),
+          baseline_answer: baselineAnswers[idx]?.answer || '',
         }));
 
         const { response, modelUsed } = await generateWithFastModelCascade(ai, {
           contents: `You are an autonomous Job Application AI Agent. Given the candidate's JSON profile and the form questions extracted from the webpage, generate the exact answer for EVERY question according to its question_type:
 - DROPDOWN or OPTION_SELECTION: Pick the exact matching option string from the question's "options" list (or "Checked (Yes)" / "Unchecked (No)" for single checkboxes).
 - DT_PICKER: Format the relevant date from the candidate's profile into the exact "date_format" (e.g. YYYY-MM-DD or YYYY-MM).
-- NUMBER_INPUT: Output only the numeric value (e.g. GPA, notice period days, CTC, or years of experience).
-- SHORT_TEXT: Output the concise factual value from the candidate's profile.
-- LONG_ESSAY: Write a compelling first-person answer (at least 160 characters) citing specific companies, projects, tech stack, and metrics from the candidate's profile.
+- NUMBER_INPUT: Output only the numeric value (e.g. GPA, notice period days, CTC, graduation year, or years of experience).
+- SHORT_TEXT: Output ONLY the concise factual value (1 to 6 words) from the candidate's profile. NEVER output a multi-sentence biography or work-experience paragraph into a SHORT_TEXT field! Examples:
+  * "Preferred Name" / "Chosen Name" -> candidate's first_name (e.g. "Lakshay")
+  * "Pronouns" -> "He/Him" (or "She/Her" / "They/Them")
+  * "End Date Year" / "Graduation Year" -> 4-digit year (e.g. "2026")
+  * "Start Date Year" -> 4-digit year (e.g. "2022")
+  * "Education" / "School" -> university name
+- LONG_ESSAY:
+  * If the question is a logistical, recruiting, or compliance question (e.g. "Do you have an active offer deadline or another recruiting-process deadline...", "Have you previously worked at...", "Do you have any non-compete agreements..."), answer the logistical question directly and concisely (e.g. "No, I do not have any active offer deadlines or competing recruiting-process deadlines at this time.") — DO NOT write a generic technical biography for logistical questions!
+  * If the question is a technical, project, motivation, or behavioral screening question (e.g. "Describe a complex project", "Why are you a strong fit?"), write a compelling first-person answer (at least 160 characters) citing specific companies, projects, tech stack, and metrics from the candidate's profile.
 
 Return ONLY valid JSON (no markdown fences) in this format:
 {
@@ -525,7 +533,7 @@ Form Questions:
 ${JSON.stringify(compactQuestions)}`,
           config: {
             systemInstruction:
-              'You are an autonomous AI Form-Filling Agent. Output ONLY valid JSON mapping every question_id to its profile-grounded answer.',
+              'You are an autonomous AI Form-Filling Agent. Output ONLY valid JSON mapping every question_id to its accurate, context-aware answer. Never put multi-sentence essays into SHORT_TEXT fields or logistical deadline questions.',
           },
         });
 
@@ -552,6 +560,26 @@ ${JSON.stringify(compactQuestions)}`,
             let finalAns = String(aiItem.answer).trim();
             let selectedOptAgentId = baseAns.selected_option_agent_id;
             let selectedOptVal = baseAns.selected_option_value;
+
+            // Safeguard: If SHORT_TEXT received an essay (>95 chars) while baseline is concise, keep baseline
+            if (
+              qObj &&
+              qObj.question_type === 'SHORT_TEXT' &&
+              finalAns.length > 95 &&
+              baseAns.answer &&
+              baseAns.answer.length <= 95
+            ) {
+              return baseAns;
+            }
+
+            // Safeguard: If question is about offer/recruiting deadlines and AI wrote a work experience bio, keep baseline
+            if (
+              qObj &&
+              /offer\s*deadline|recruiting[- ]process\s*deadline|competing\s*offer/i.test(qObj.question_text) &&
+              !/\b(no|none|deadline|timeline|offer)\b/i.test(finalAns)
+            ) {
+              return baseAns;
+            }
 
             if (qObj && (qObj.question_type === 'DROPDOWN' || qObj.question_type === 'OPTION_SELECTION')) {
               if (qObj.options && qObj.options.length > 0) {

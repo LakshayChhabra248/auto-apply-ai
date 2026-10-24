@@ -99,15 +99,22 @@ export function classifyQuestionControlType(el: {
     };
   }
 
+  const isStandaloneYearOrMonthField =
+    type !== 'date' &&
+    type !== 'month' &&
+    type !== 'datetime-local' &&
+    /\b(year|month)\b/i.test(combined);
+
   if (
-    type === 'date' ||
-    type === 'month' ||
-    type === 'datetime-local' ||
-    type === 'time' ||
-    /\b(start\s*date|end\s*date|date\s*of\s*birth|dob|joining\s*date|available\s*date|graduation\s*date)\b/i.test(
-      combined
-    ) ||
-    /\b(yyyy-mm-dd|yyyy-mm|mm\/dd\/yyyy|dd\/mm\/yyyy)\b/i.test(combined)
+    !isStandaloneYearOrMonthField &&
+    (type === 'date' ||
+      type === 'month' ||
+      type === 'datetime-local' ||
+      type === 'time' ||
+      /\b(start\s*date|end\s*date|date\s*of\s*birth|dob|joining\s*date|available\s*date|graduation\s*date)\b/i.test(
+        combined
+      ) ||
+      /\b(yyyy-mm-dd|yyyy-mm|mm\/dd\/yyyy|dd\/mm\/yyyy)\b/i.test(combined))
   ) {
     let dateFormat: 'YYYY-MM-DD' | 'YYYY-MM' | 'MM/DD/YYYY' | 'YYYY' = 'YYYY-MM-DD';
     if (
@@ -130,15 +137,19 @@ export function classifyQuestionControlType(el: {
     tag === 'select' ||
     role === 'combobox' ||
     role === 'listbox' ||
+    type === 'combobox' ||
+    type === 'dropdown' ||
     (Array.isArray(el.options) && el.options.length > 0) ||
-    /\b(current\s*location|city|university|institution)\b/i.test(combined)
+    /\b(country|current\s*location|city|university|institution|school|degree|discipline)\b/i.test(
+      combined
+    )
   ) {
     const optCount = Array.isArray(el.options) ? el.options.length : 0;
     return {
       question_type: 'DROPDOWN',
       question_type_label:
-        role === 'combobox' || /\b(location|university)\b/i.test(combined)
-          ? 'Dropdown (Typeahead Combobox)'
+        role === 'combobox' || /\b(location|university|school|country)\b/i.test(combined)
+          ? 'Dropdown (Combobox)'
           : optCount > 0
           ? `Dropdown (${optCount} options)`
           : 'Dropdown Select',
@@ -210,7 +221,8 @@ export function formatProfileDateForPicker(
 
 /**
  * Converts a list of DistilledElements into grouped, properly labeled DetectedFormQuestions.
- * Automatically groups radio buttons sharing a name or question context into a single OPTION_SELECTION question.
+ * Automatically groups radio buttons sharing a name or question context into a single OPTION_SELECTION question,
+ * while preserving custom <button role="combobox"> dropdowns (such as Stripe Careers "Country *").
  */
 export function convertDistilledElementsToQuestions(
   elements: DistilledElement[]
@@ -219,8 +231,15 @@ export function convertDistilledElementsToQuestions(
   const radioGroups = new Map<string, DistilledElement[]>();
   let qCounter = 1;
 
+  const isDropdownButton = (el: DistilledElement) =>
+    el.role === 'combobox' ||
+    el.role === 'listbox' ||
+    el.type === 'combobox' ||
+    el.type === 'dropdown' ||
+    (Array.isArray(el.options) && el.options.length > 0);
+
   for (const el of elements) {
-    if (el.tag === 'button') continue;
+    if (el.tag === 'button' && !isDropdownButton(el)) continue;
     if (el.type === 'radio') {
       const groupKey = el.name || `radio_group_${el.in_shadow_dom ? 'shadow' : 'main'}`;
       const existing = radioGroups.get(groupKey) || [];
@@ -232,7 +251,7 @@ export function convertDistilledElementsToQuestions(
   const emittedRadioGroups = new Set<string>();
 
   for (const el of elements) {
-    if (el.tag === 'button') continue;
+    if (el.tag === 'button' && !isDropdownButton(el)) continue;
 
     if (el.type === 'radio') {
       const groupKey = el.name || `radio_group_${el.in_shadow_dom ? 'shadow' : 'main'}`;
@@ -240,7 +259,6 @@ export function convertDistilledElementsToQuestions(
       emittedRadioGroups.add(groupKey);
 
       const groupEls = radioGroups.get(groupKey) || [el];
-      // Extract clean overarching question text if embedded or infer from option labels
       let questionText = el.label;
       const optionLabels = groupEls.map((g) => g.label.trim());
       const combinedOpts = optionLabels.join(' ').toLowerCase();
@@ -322,7 +340,13 @@ export function matchBestOption(
   );
   if (exact) return exact;
 
-  // 2. Yes / No semantic matching for Option Selection
+  // 2. Country / Phone Country Code matching (e.g. "India" <-> "India (+91)" <-> "+91")
+  if (target === 'india' || target === '+91' || target.includes('india')) {
+    const indiaMatch = options.find((o) => /\b(india|\+91)\b/i.test(`${o.label} ${o.value}`));
+    if (indiaMatch) return indiaMatch;
+  }
+
+  // 3. Yes / No semantic matching for Option Selection
   if (target === 'yes' || target === 'true') {
     const yesMatch = options.find((o) =>
       /\b(yes|true|authorized|i\s*am\s*authorized|agree|willing)\b/i.test(o.label)
@@ -336,7 +360,7 @@ export function matchBestOption(
     if (noMatch) return noMatch;
   }
 
-  // 3. Degree synonym matching (e.g., B.Tech -> Bachelor's / Bachelor of Technology)
+  // 4. Degree synonym matching (e.g., B.Tech -> Bachelor's / Bachelor of Technology)
   if (/b\.?\s*tech|bachelor/i.test(target)) {
     const degMatch = options.find((o) => /b\.?\s*tech|bachelor|undergraduate|b\.?\s*e\b/i.test(o.label));
     if (degMatch) return degMatch;
@@ -346,7 +370,37 @@ export function matchBestOption(
     if (degMatch) return degMatch;
   }
 
-  // 4. Substring containment
+  // 4b. Month name / number synonym matching (e.g. "May" <-> "05" <-> "5 - May", "August" <-> "08" <-> "Aug")
+  const MONTH_SYNONYMS: Record<string, RegExp> = {
+    january: /\b(january|jan|0?1)\b/i,
+    february: /\b(february|feb|0?2)\b/i,
+    march: /\b(march|mar|0?3)\b/i,
+    april: /\b(april|apr|0?4)\b/i,
+    may: /\b(may|0?5)\b/i,
+    june: /\b(june|jun|0?6)\b/i,
+    july: /\b(july|jul|0?7)\b/i,
+    august: /\b(august|aug|0?8)\b/i,
+    september: /\b(september|sep|sept|0?9)\b/i,
+    october: /\b(october|oct|10)\b/i,
+    november: /\b(november|nov|11)\b/i,
+    december: /\b(december|dec|12)\b/i,
+  };
+  if (MONTH_SYNONYMS[target]) {
+    const mMatch = options.find((o) => MONTH_SYNONYMS[target].test(`${o.label} ${o.value}`));
+    if (mMatch) return mMatch;
+  }
+
+  // 4c. Pronouns matching (e.g. "He/Him" <-> "He / Him / His")
+  if (target.includes('he/him')) {
+    const pMatch = options.find((o) => /\bhe\s*\/\s*him/i.test(o.label));
+    if (pMatch) return pMatch;
+  }
+  if (target.includes('she/her')) {
+    const pMatch = options.find((o) => /\bshe\s*\/\s*her/i.test(o.label));
+    if (pMatch) return pMatch;
+  }
+
+  // 5. Substring containment
   const substringMatch = options.find(
     (o) =>
       o.label.toLowerCase().includes(target) ||
@@ -355,7 +409,7 @@ export function matchBestOption(
   );
   if (substringMatch) return substringMatch;
 
-  // 5. Token overlap scoring
+  // 6. Token overlap scoring
   const targetTokens = target.split(/[^a-z0-9+]+/).filter((t) => t.length >= 2);
   let bestOpt = options[0];
   let bestScore = -1;
@@ -374,6 +428,46 @@ export function matchBestOption(
   if (bestScore > 0) return bestOpt;
   void questionText;
   return options[0];
+}
+
+const MONTH_NAMES = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+];
+
+function extractMonthNameFromDateStr(rawDate: string | undefined, fallbackMonth = 'May'): string {
+  if (!rawDate) return fallbackMonth;
+  const match = rawDate.trim().match(/^(\d{4})-(\d{1,2})/);
+  if (match && match[2]) {
+    const idx = Math.max(0, Math.min(11, parseInt(match[2], 10) - 1));
+    return MONTH_NAMES[idx] || fallbackMonth;
+  }
+  return fallbackMonth;
+}
+
+function extractYearFromDateStr(rawDate: string | undefined, fallbackYear = '2026'): string {
+  if (!rawDate) return fallbackYear;
+  if (/present|current|now/i.test(rawDate)) return String(new Date().getFullYear());
+  const match = rawDate.trim().match(/(\d{4})/);
+  return match ? match[1] : fallbackYear;
+}
+
+function derivePronounsFromProfile(profile: UserProfileSchema): string {
+  const g = (profile.application_metadata?.gender || '').trim().toLowerCase();
+  if (g.startsWith('f') || g.includes('woman') || g.includes('female')) return 'She/Her';
+  if (g.startsWith('m') || g.includes('man') || g.includes('male')) return 'He/Him';
+  if (g.includes('non') || g.includes('they')) return 'They/Them';
+  return 'He/Him';
 }
 
 /**
@@ -558,12 +652,18 @@ export function reasonAnswerForQuestions(
         const needsYes = Boolean(meta.requires_sponsorship || meta.notice_period_days > 30);
         desiredChoice = needsYes ? 'Yes' : 'No';
         profileSource = 'application_metadata.requires_sponsorship & notice_period_days';
+      } else if (/offer\s*deadline|recruiting.*deadline|competing\s*offer|previously\s*worked|ever\s*been\s*employed|former\s*employee|non-?compete|relative|government\s*official/i.test(key)) {
+        desiredChoice = 'No';
+        profileSource = 'application_metadata (Compliance / Recruiting)';
       } else if (/authorized|legally\s*eligible|work\s*authorization/i.test(key)) {
         desiredChoice = meta.work_authorization !== false ? 'Yes' : 'No';
         profileSource = 'application_metadata.work_authorization';
       } else if (/relocate|hybrid|remote|on-?site/i.test(key)) {
         desiredChoice = 'Yes';
         profileSource = 'application_metadata (Work Preference)';
+      } else if (/pronoun/i.test(key)) {
+        desiredChoice = derivePronounsFromProfile(profile);
+        profileSource = 'application_metadata.gender -> pronouns';
       } else if (/gender/i.test(key)) {
         desiredChoice = meta.gender || 'Male';
         profileSource = 'application_metadata.gender';
@@ -593,7 +693,16 @@ export function reasonAnswerForQuestions(
     }
 
     // 4. Determine underlying profile answer for DROPDOWN, NUMBER_INPUT, SHORT_TEXT, LONG_ESSAY
-    if (/full\s*name|candidate\s*name|your\s*name|applicant\s*name/i.test(key)) {
+    if (/preferred\s*name|chosen\s*name|nick\s*name|preferred\s*first\s*name|what\s*should\s*we\s*call\s*you/i.test(key)) {
+      rawAnswer = p.first_name;
+      profileSource = 'personal_info.first_name (Preferred Name)';
+    } else if (/middle\s*name|middle\s*initial/i.test(key)) {
+      rawAnswer = '';
+      profileSource = 'personal_info (Middle Name optional)';
+    } else if (/pronoun/i.test(key)) {
+      rawAnswer = derivePronounsFromProfile(profile);
+      profileSource = 'application_metadata.gender -> pronouns';
+    } else if (/full\s*name|candidate\s*name|your\s*name|applicant\s*name|legal\s*name|signature|print\s*name/i.test(key)) {
       rawAnswer = `${p.first_name} ${p.last_name}`.trim();
       profileSource = 'personal_info.first_name + last_name';
     } else if (/first\s*name|given\s*name|fname/i.test(key)) {
@@ -608,22 +717,43 @@ export function reasonAnswerForQuestions(
     } else if (/country\s*code|phone\s*code|dial\s*code/i.test(key)) {
       rawAnswer = p.phone.country_code || '+91';
       profileSource = 'personal_info.phone.country_code';
+    } else if (/\bcountry\b/i.test(key) && !/phone\s*number/i.test(key)) {
+      rawAnswer = p.location.country || 'India';
+      profileSource = 'personal_info.location.country';
     } else if (/phone|mobile|contact\s*number|whatsapp|tel/i.test(key)) {
       rawAnswer = p.phone.number;
       profileSource = 'personal_info.phone.number';
     } else if (/linkedin/i.test(key)) {
-      rawAnswer = p.links.linkedin || `https://linkedin.com/in/${p.first_name.toLowerCase()}-${p.last_name.toLowerCase()}`;
+      rawAnswer = p.links.linkedin || p.links.github || p.links.portfolio || `https://linkedin.com/in/${p.first_name.toLowerCase()}-${p.last_name.toLowerCase()}`;
       profileSource = 'personal_info.links.linkedin';
     } else if (/github/i.test(key)) {
-      rawAnswer = p.links.github || `https://github.com/${p.first_name.toLowerCase()}${p.last_name.toLowerCase()}`;
+      rawAnswer = p.links.github || p.links.portfolio || p.links.linkedin || `https://github.com/${p.first_name.toLowerCase()}${p.last_name.toLowerCase()}`;
       profileSource = 'personal_info.links.github';
     } else if (/portfolio|website|personal\s*url|blog/i.test(key)) {
       rawAnswer = p.links.portfolio || p.links.github || p.links.linkedin;
       profileSource = 'personal_info.links.portfolio';
+    } else if (/offer\s*deadline|recruiting[- ]process\s*deadline|recruiting\s*deadline|competing\s*offer|other\s*deadline|decision\s*deadline/i.test(key)) {
+      rawAnswer =
+        q.question_type === 'SHORT_TEXT' || q.question_type === 'DROPDOWN'
+          ? 'No'
+          : 'No, I do not have any active offer deadlines or competing recruiting-process deadlines at this time, and I am flexible with your interview timeline.';
+      profileSource = 'application_metadata (Recruiting Timeline & Deadlines)';
+    } else if (/\b(end|to|graduation|passing|completion|expected)\s*(?:date\s*)?year\b|\bgraduation\s*year\b|\bpassing\s*year\b|\bbatch\b/i.test(key)) {
+      rawAnswer = extractYearFromDateStr(edu.end_date, '2026');
+      profileSource = 'education[0].end_date (Year)';
+    } else if (/\b(start|from|enrollment)\s*(?:date\s*)?year\b/i.test(key)) {
+      rawAnswer = extractYearFromDateStr(edu.start_date, '2022');
+      profileSource = 'education[0].start_date (Year)';
+    } else if (/\b(end|to|graduation|completion|expected)\s*(?:date\s*)?month\b/i.test(key)) {
+      rawAnswer = extractMonthNameFromDateStr(edu.end_date, 'May');
+      profileSource = 'education[0].end_date (Month)';
+    } else if (/\b(start|from|enrollment)\s*(?:date\s*)?month\b/i.test(key)) {
+      rawAnswer = extractMonthNameFromDateStr(edu.start_date, 'August');
+      profileSource = 'education[0].start_date (Month)';
     } else if (/pincode|postal\s*code|zip\s*code/i.test(key)) {
       rawAnswer = p.location.pincode || '110001';
       profileSource = 'personal_info.location.pincode';
-    } else if (/current\s*location|city|location/i.test(key) && !/company/i.test(key)) {
+    } else if (/current\s*location|city|location|preferred\s*office|which\s*office/i.test(key) && !/company/i.test(key)) {
       rawAnswer = [p.location.city, p.location.state, p.location.country]
         .filter(Boolean)
         .join(', ');
@@ -631,13 +761,10 @@ export function reasonAnswerForQuestions(
     } else if (/address|street/i.test(key)) {
       rawAnswer = p.location.address || `${p.location.city}, ${p.location.state}`;
       profileSource = 'personal_info.location.address';
-    } else if (/country/i.test(key)) {
-      rawAnswer = p.location.country || 'India';
-      profileSource = 'personal_info.location.country';
     } else if (/state|province/i.test(key)) {
       rawAnswer = p.location.state || p.location.city;
       profileSource = 'personal_info.location.state';
-    } else if (/university|college|institution|school|alma\s*mater/i.test(key)) {
+    } else if (/university|college|institution|school|alma\s*mater|^education\s*\*?$/i.test(key.trim())) {
       rawAnswer = edu.institution;
       profileSource = 'education[0].institution';
     } else if (/degree|qualification|highest\s*education/i.test(key)) {
@@ -650,9 +777,30 @@ export function reasonAnswerForQuestions(
     } else if (/cgpa|gpa|cpi|grade|percentage/i.test(key)) {
       rawAnswer = String(edu.gpa);
       profileSource = 'education[0].gpa';
-    } else if (/graduation\s*year|passing\s*year|batch/i.test(key)) {
-      rawAnswer = (edu.end_date || '2025').split('-')[0];
-      profileSource = 'education[0].end_date';
+    } else if (/previously\s*worked|ever\s*been\s*employed|former\s*employee|previously\s*interned|worked\s*at\s*stripe/i.test(key)) {
+      rawAnswer =
+        q.question_type === 'LONG_ESSAY'
+          ? 'No, I have not previously been employed by or interned with the company.'
+          : 'No';
+      profileSource = 'work_experience (Prior Employment Check)';
+    } else if (/how\s*did\s*you\s*hear|where\s*did\s*you\s*hear|source\s*of\s*application/i.test(key)) {
+      rawAnswer = 'Company Careers Page & LinkedIn';
+      profileSource = 'application_metadata (Source)';
+    } else if (/referred\s*by|employee\s*referral|referrer|who\s*referred/i.test(key)) {
+      rawAnswer = /name|email|who/i.test(key) ? 'N/A' : 'No';
+      profileSource = 'application_metadata (Referral)';
+    } else if (/non-?compete|restrictive\s*covenant|bound\s*by\s*any\s*agreement/i.test(key)) {
+      rawAnswer =
+        q.question_type === 'LONG_ESSAY'
+          ? 'No, I am not bound by any non-compete agreements or restrictive covenants.'
+          : 'No';
+      profileSource = 'application_metadata (Legal / Compliance)';
+    } else if (/relocate|willing\s*to\s*relocate|work\s*from\s*office|hybrid|in-?office|onsite/i.test(key)) {
+      rawAnswer =
+        q.question_type === 'LONG_ESSAY'
+          ? `Yes, I am open to relocating and working onsite or hybrid as required.`
+          : 'Yes';
+      profileSource = 'application_metadata (Relocation & Work Arrangement)';
     } else if (/company\s*name|employer|current\s*company|organization/i.test(key)) {
       const exp = profile.work_experience[companyIdx] || profile.work_experience[0];
       companyIdx++;
@@ -700,17 +848,47 @@ export function reasonAnswerForQuestions(
     } else if (/veteran/i.test(key)) {
       rawAnswer = meta.veteran_status || 'I am not a protected veteran';
       profileSource = 'application_metadata.veteran_status';
-    } else if (/authorized|work\s*authorization|legally\s*eligible/i.test(key)) {
-      rawAnswer = meta.work_authorization !== false ? 'Yes' : 'No';
+    } else if (/authorized|work\s*authorization|legally\s*eligible|right\s*to\s*work/i.test(key)) {
+      rawAnswer =
+        q.question_type === 'LONG_ESSAY'
+          ? `Yes, I am legally authorized to work in ${p.location.country || 'India'} without restrictions.`
+          : meta.work_authorization !== false
+          ? 'Yes'
+          : 'No';
       profileSource = 'application_metadata.work_authorization';
-    } else if (/sponsorship|require\s*visa/i.test(key)) {
-      rawAnswer = meta.requires_sponsorship ? 'Yes' : 'No';
+    } else if (/sponsorship|require\s*visa|need\s*visa/i.test(key)) {
+      rawAnswer =
+        q.question_type === 'LONG_ESSAY'
+          ? meta.requires_sponsorship
+            ? 'Yes, I will require visa sponsorship.'
+            : 'No, I do not require visa sponsorship now or in the future.'
+          : meta.requires_sponsorship
+          ? 'Yes'
+          : 'No';
       profileSource = 'application_metadata.requires_sponsorship';
+    } else if (/citizenship|nationality/i.test(key)) {
+      rawAnswer = p.location.country || 'India';
+      profileSource = 'personal_info.location.country (Citizenship)';
     } else if (/skills|technologies|tech\s*stack|programming\s*languages/i.test(key)) {
       rawAnswer = (profile.skills || []).join(', ');
       profileSource = 'skills[]';
+    } else if (q.question_type === 'SHORT_TEXT' || q.question_type === 'NUMBER_INPUT') {
+      // CRITICAL GUARD: Never dump a multi-sentence biography into a SHORT_TEXT or NUMBER_INPUT field!
+      if (q.question_type === 'NUMBER_INPUT' || /\byear\b/i.test(key)) {
+        rawAnswer = extractYearFromDateStr(edu.end_date, '2026');
+        profileSource = 'education[0].end_date (Year)';
+      } else if (/\bmonth\b/i.test(key)) {
+        rawAnswer = extractMonthNameFromDateStr(edu.end_date, 'May');
+        profileSource = 'education[0].end_date (Month)';
+      } else if (/^(do|are|have|will|can|would|is|did|were)\b/i.test(q.question_text.trim())) {
+        rawAnswer = /deadline|conflict|compete|sponsorship|former|previously/i.test(key) ? 'No' : 'Yes';
+        profileSource = 'application_metadata (Concise Yes/No)';
+      } else {
+        rawAnswer = `${edu.degree} (${edu.major}) — ${edu.institution}`;
+        profileSource = 'education[0] (Concise Summary)';
+      }
     } else {
-      // Open-ended / Custom Question Answering from Profile Knowledge Base
+      // Open-ended / Custom Question Answering from Profile Knowledge Base (for LONG_ESSAY)
       rawAnswer = synthesizeAnswerForAnyQuestion(q.question_text, profile, jobDescriptionText);
       profileSource = 'AI Profile Synthesis (work_experience + projects + skills + education)';
     }
@@ -762,11 +940,13 @@ export function synthesizeAnswerForAnyQuestion(
 ): string {
   const lower = questionText.toLowerCase();
   const p = profile.personal_info;
+  const meta = profile.application_metadata;
   const edu = profile.education[0] || {
     institution: 'Delhi Technological University',
     degree: 'B.Tech',
     major: 'Computer Science',
     gpa: 8.8,
+    end_date: '2026-05',
   };
   const exp0 = profile.work_experience[0] || {
     company: 'Atlassian',
@@ -781,6 +961,29 @@ export function synthesizeAnswerForAnyQuestion(
   const proj1 = profile.projects[1];
   const topSkills = (profile.skills || []).slice(0, 8).join(', ');
 
+  // 1. Logistical / Recruiting / Compliance questions rendered inside <textarea>
+  if (/offer\s*deadline|recruiting[- ]process\s*deadline|recruiting\s*deadline|competing\s*offer|other\s*deadline|decision\s*deadline/i.test(lower)) {
+    return 'No, I do not have any active offer deadlines or competing recruiting-process deadlines at this time, and I have full flexibility with your interview timeline.';
+  }
+  if (/accommodation|accessibility\s*need/i.test(lower)) {
+    return 'No special accommodations are required at this time, thank you.';
+  }
+  if (/non-?compete|restrictive\s*covenant|bound\s*by\s*any\s*agreement|conflict\s*of\s*interest/i.test(lower)) {
+    return 'No, I am not bound by any non-compete agreements, restrictive covenants, or conflicts of interest.';
+  }
+  if (/previously\s*worked|ever\s*been\s*employed|former\s*employee|previously\s*interned/i.test(lower)) {
+    return 'No, I have not previously been employed by or interned with the company.';
+  }
+  if (/sponsorship|require\s*visa|need\s*visa/i.test(lower)) {
+    return meta?.requires_sponsorship
+      ? 'Yes, I will require visa sponsorship.'
+      : 'No, I do not require visa sponsorship now or in the future, and I am fully authorized to work.';
+  }
+  if (/when\s*can\s*you\s*start|earliest\s*start|availability|notice\s*period/i.test(lower)) {
+    return `I am available to start from ${meta?.earliest_joining_date || '2026-06-01'} (notice period: ${meta?.notice_period_days ?? 0} days) and can align with your preferred onboarding schedule.`;
+  }
+
+  // 2. Technical / Project / Behavioral Essay Questions
   if (lower.includes('project') || lower.includes('architecture') || lower.includes('complex') || lower.includes('built')) {
     const secondProjSentence = proj1
       ? ` Additionally, I built ${proj1.title} (${(proj1.tech_stack || []).join(', ')}), where ${proj1.description}`
@@ -788,7 +991,7 @@ export function synthesizeAnswerForAnyQuestion(
     return `My most complex engineering project is ${proj0.title}, built using ${(proj0.tech_stack || []).join(', ')}. ${proj0.description}${secondProjSentence} Combined with my experience as ${exp0.role} at ${exp0.company} and strong proficiency in ${topSkills}, I design resilient, production-grade architectures with measurable latency and throughput gains.`;
   }
 
-  if (lower.includes('strong fit') || lower.includes('why') || lower.includes('hire') || lower.includes('join') || lower.includes('motivation')) {
+  if (lower.includes('strong fit') || lower.includes('why') || lower.includes('hire') || lower.includes('join') || lower.includes('motivation') || lower.includes('interest')) {
     return `During my tenure as ${exp0.role} at ${exp0.company} and my ${edu.degree} in ${edu.major} at ${edu.institution} (CGPA ${edu.gpa}), I specialized in building production software systems using ${topSkills}. At ${exp0.company}, ${(exp0.description_bullets && exp0.description_bullets[0]) || 'I delivered high-impact engineering features in production.'} My hands-on experience shipping ${proj0.title} directly aligns with ${jobDescriptionText.slice(0, 65).trim()} and allows me to contribute immediately.`;
   }
 
@@ -802,3 +1005,4 @@ export function synthesizeAnswerForAnyQuestion(
 
   return `I am ${p.first_name} ${p.last_name}, a ${edu.degree} (${edu.major}, CGPA ${edu.gpa}) candidate from ${edu.institution} with experience as ${exp0.role} at ${exp0.company}. My technical stack spans ${topSkills}, and I have built production systems including ${proj0.title} (${(proj0.tech_stack || []).slice(0, 4).join(', ')}). At ${exp0.company}, ${(exp0.description_bullets && exp0.description_bullets[0]) || 'I engineered scalable full-stack and backend solutions.'}`;
 }
+
