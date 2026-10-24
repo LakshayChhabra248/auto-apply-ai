@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   Play,
   Zap,
@@ -10,13 +10,23 @@ import {
   ShieldAlert,
   Copy,
   Check,
+  Sparkles,
+  Send,
 } from 'lucide-react';
 import {
   AgentState,
   AgentActionStep,
   DistilledElement,
   TokenTelemetry,
+  UserProfileSchema,
 } from '../types/autoapply';
+import {
+  convertDistilledElementsToQuestions,
+  reasonAnswerForQuestions,
+  AgentQuestionAnswer,
+  QuestionControlType,
+} from '../utils/questionAgent';
+import { DEFAULT_USER_PROFILE } from '../data/seedProfile';
 
 interface ExtensionSidePanelProps {
   agentState: AgentState;
@@ -25,6 +35,8 @@ interface ExtensionSidePanelProps {
   actionPlan: AgentActionStep[];
   telemetry: TokenTelemetry;
   isExecuting: boolean;
+  profile?: UserProfileSchema;
+  cachedResumeFileName?: string;
   onDistillOnly: () => void;
   onRunCurrentPageAgent: () => Promise<void>;
   onRunFullAutopilot: () => Promise<void>;
@@ -32,13 +44,12 @@ interface ExtensionSidePanelProps {
 
 const MV3_MANIFEST_CODE = `{
   "manifest_version": 3,
-  "name": "AutoApply AI — Hybrid-Agentic ATS Engine",
-  "version": "1.0.0",
-  "permissions": ["storage", "sidePanel", "activeTab", "scripting", "notifications"],
+  "name": "AutoApply AI — Autonomous ATS Form Agent",
+  "version": "1.3.0",
+  "permissions": ["storage", "sidePanel", "activeTab", "scripting", "tabs"],
   "host_permissions": ["<all_urls>"],
   "background": {
-    "service_worker": "background.js",
-    "type": "module"
+    "service_worker": "background.js"
   },
   "side_panel": {
     "default_path": "sidepanel.html"
@@ -46,35 +57,28 @@ const MV3_MANIFEST_CODE = `{
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["content-script.js"],
-      "run_at": "document_idle"
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
     }
   ]
 }`;
 
-const MV3_CONTENT_SCRIPT_CODE = `// FR 2.3: React/Vue Synthetic Event Bypass
-export function setNativeValue(element: HTMLElement, value: string) {
-  const proto = element.tagName === 'TEXTAREA'
-    ? window.HTMLTextAreaElement.prototype
-    : element.tagName === 'SELECT'
-    ? window.HTMLSelectElement.prototype
-    : window.HTMLInputElement.prototype;
-  const valueSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-  valueSetter?.call(element, value);
-  element.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
-  element.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
-  element.dispatchEvent(new Event('blur', { bubbles: true, composed: true }));
-}
-
-// FR 2.1: Recursive DOM + Open Shadow Root Distiller
-export function traverseWithShadowDOM(root: Document | ShadowRoot | Element, acc: HTMLElement[] = []) {
-  for (const el of Array.from(root.querySelectorAll('*')) as HTMLElement[]) {
-    if (['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(el.tagName) || el.getAttribute('role') === 'combobox') {
-      acc.push(el);
-    }
-    if (el.shadowRoot) traverseWithShadowDOM(el.shadowRoot, acc);
-  }
-  return acc;
+const MV3_CONTENT_SCRIPT_CODE = `// Question & Control Type Detector (DROPDOWN, DT_PICKER, OPTION_SELECTION, NUMBER, ESSAY)
+function classifyControlQuestionType(el, questionText, optionsList) {
+  const tag = el.tagName.toLowerCase();
+  const type = (el.getAttribute('type') || tag).toLowerCase();
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  if (type === 'file') return { question_type: 'FILE_UPLOAD', label: 'File Upload (PDF)' };
+  if (type === 'radio' || type === 'checkbox') return { question_type: 'OPTION_SELECTION', label: 'Option Selection' };
+  if (type === 'date' || type === 'month' || /start\\s*date|end\\s*date|joining\\s*date/i.test(questionText))
+    return { question_type: 'DT_PICKER', label: 'DT Picker (Date/Month)' };
+  if (tag === 'select' || role === 'combobox' || (optionsList && optionsList.length > 0))
+    return { question_type: 'DROPDOWN', label: 'Dropdown Select' };
+  if (type === 'number' || /cgpa|gpa|ctc|notice\\s*period/i.test(questionText))
+    return { question_type: 'NUMBER_INPUT', label: 'Number Input' };
+  if (tag === 'textarea') return { question_type: 'LONG_ESSAY', label: 'Long Essay / Screening' };
+  return { question_type: 'SHORT_TEXT', label: 'Short Text Input' };
 }`;
 
 export const ExtensionSidePanel: React.FC<ExtensionSidePanelProps> = ({
@@ -84,12 +88,138 @@ export const ExtensionSidePanel: React.FC<ExtensionSidePanelProps> = ({
   actionPlan,
   telemetry,
   isExecuting,
+  profile = DEFAULT_USER_PROFILE,
+  cachedResumeFileName,
   onDistillOnly,
   onRunCurrentPageAgent,
   onRunFullAutopilot,
 }) => {
-  const [activeTab, setActiveTab] = useState<'actions' | 'dom' | 'mv3'>('actions');
+  const [activeTab, setActiveTab] = useState<'questions' | 'actions' | 'dom' | 'mv3'>('questions');
   const [copiedCode, setCopiedCode] = useState(false);
+
+  // Convert distilled elements on the current page into grouped questions with QuestionControlType
+  const detectedQuestions = useMemo(
+    () => convertDistilledElementsToQuestions(distilledElements),
+    [distilledElements]
+  );
+
+  // Compute baseline answers for all detected questions from the active profile
+  const baselineAnswers = useMemo(
+    () =>
+      reasonAnswerForQuestions(
+        detectedQuestions,
+        profile,
+        'Software Engineer — Autonomous Agent Systems',
+        cachedResumeFileName
+      ),
+    [detectedQuestions, profile, cachedResumeFileName]
+  );
+
+  const [aiAnswers, setAiAnswers] = useState<AgentQuestionAnswer[]>(baselineAnswers);
+  const [aiEngineName, setAiEngineName] = useState<string>('Profile Question-Type Agent');
+  const [isPlanningWithAi, setIsPlanningWithAi] = useState<boolean>(false);
+
+  useEffect(() => {
+    setAiAnswers(baselineAnswers);
+  }, [baselineAnswers]);
+
+  // Custom question tester state
+  const [customQuestionText, setCustomQuestionText] = useState<string>('');
+  const [customQuestionType, setCustomQuestionType] = useState<'AUTO' | QuestionControlType>('AUTO');
+  const [customOptionsText, setCustomOptionsText] = useState<string>('');
+  const [customQuestionResult, setCustomQuestionResult] = useState<AgentQuestionAnswer | null>(null);
+  const [isAskingCustom, setIsAskingCustom] = useState<boolean>(false);
+
+  const handleRunGeminiPlanForm = async () => {
+    if (detectedQuestions.length === 0) return;
+    setIsPlanningWithAi(true);
+    try {
+      const resp = await fetch('/api/agent/plan-form', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          questions: detectedQuestions,
+          profile,
+          jobDescription: 'Software Engineer — Autonomous Agent Systems',
+          cachedResumeFileName,
+        }),
+      });
+      const data = await resp.json();
+      if (Array.isArray(data?.answers) && data.answers.length > 0) {
+        setAiAnswers(data.answers);
+        setAiEngineName(data.engine || 'gemini-3.1-flash-lite-preview');
+      }
+    } catch {
+      // keep baselineAnswers
+    } finally {
+      setIsPlanningWithAi(false);
+    }
+  };
+
+  const handleAskCustomQuestion = async () => {
+    const qText = customQuestionText.trim();
+    if (!qText) return;
+    setIsAskingCustom(true);
+
+    const parsedOptions = customOptionsText
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => ({ label: s, value: s }));
+
+    let resolvedType: QuestionControlType =
+      customQuestionType === 'AUTO' ? 'SHORT_TEXT' : customQuestionType;
+    if (customQuestionType === 'AUTO') {
+      if (parsedOptions.length > 0) resolvedType = 'DROPDOWN';
+      else if (/date|dob|joining|graduation|start|end/i.test(qText)) resolvedType = 'DT_PICKER';
+      else if (/how many years|gpa|cgpa|ctc|salary|notice/i.test(qText))
+        resolvedType = 'NUMBER_INPUT';
+      else if (/why|describe|explain|project|complex|fit|challenge/i.test(qText))
+        resolvedType = 'LONG_ESSAY';
+    }
+
+    const singleQuestion = {
+      question_id: 'custom_q_1',
+      agent_ids: ['custom_q_1'],
+      question_text: qText,
+      question_type: resolvedType,
+      question_type_label:
+        resolvedType === 'DROPDOWN'
+          ? `Dropdown (${parsedOptions.length || 1} options)`
+          : resolvedType === 'DT_PICKER'
+          ? 'DT Picker (YYYY-MM-DD)'
+          : resolvedType === 'OPTION_SELECTION'
+          ? 'Option Selection (Radio)'
+          : resolvedType,
+      raw_input_type: resolvedType.toLowerCase(),
+      options: parsedOptions,
+      date_format: 'YYYY-MM-DD' as const,
+    };
+
+    try {
+      const resp = await fetch('/api/agent/plan-form', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          questions: [singleQuestion],
+          profile,
+          jobDescription: 'Software Engineer — Autonomous Agent Systems',
+        }),
+      });
+      const data = await resp.json();
+      if (data?.answers?.[0]) {
+        setCustomQuestionResult(data.answers[0]);
+        setIsAskingCustom(false);
+        return;
+      }
+    } catch {
+      // fallback to local reasoner
+    }
+
+    const fallback = reasonAnswerForQuestions([singleQuestion], profile)[0];
+    setCustomQuestionResult(fallback);
+    setIsAskingCustom(false);
+  };
 
   const copyMv3Code = () => {
     navigator.clipboard?.writeText(`${MV3_MANIFEST_CODE}\n\n${MV3_CONTENT_SCRIPT_CODE}`);
@@ -106,10 +236,10 @@ export const ExtensionSidePanel: React.FC<ExtensionSidePanelProps> = ({
       <div className="px-4 py-3 bg-slate-950 border-b border-slate-800 flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="text-xs font-semibold text-white tracking-tight truncate">
-            AutoApply AI · Chrome SidePanel (MV3)
+            AutoApply AI · Question &amp; Type Agent (MV3 v1.3)
           </div>
           <div className="text-[11px] text-slate-400 font-mono truncate">
-            background.js Master State · Page {currentPage}/4
+            Active Profile: {profile.personal_info.first_name} {profile.personal_info.last_name} · Page {currentPage}/4
           </div>
         </div>
         <span className="text-[11px] font-mono font-semibold text-blue-400 whitespace-nowrap shrink-0">
@@ -120,15 +250,15 @@ export const ExtensionSidePanel: React.FC<ExtensionSidePanelProps> = ({
       {/* State Machine Pipeline Bar (FR 4.1) */}
       <div className="px-4 py-2.5 bg-slate-900/90 border-b border-slate-800">
         <div className="text-[11px] text-slate-400 mb-1.5 flex items-center justify-between">
-          <span>Service Worker State Machine</span>
-          <span className="font-mono tabular-nums text-slate-300">
-            Latency: {telemetry.latencyMs}ms
+          <span>AI Agent Perception &amp; Action Loop</span>
+          <span className="font-mono tabular-nums text-emerald-400">
+            {detectedQuestions.length} Questions Detected
           </span>
         </div>
         <div className="grid grid-cols-3 gap-1.5 text-[11px] font-mono">
           {[
-            { id: 'ANALYZING_DOM', label: '1. ANALYZE_DOM' },
-            { id: 'EXECUTING_ACTIONS', label: '2. EXECUTE_LOOP' },
+            { id: 'ANALYZING_DOM', label: '1. SCAN_TYPES' },
+            { id: 'EXECUTING_ACTIONS', label: '2. AI_ANSWER' },
             { id: 'AWAITING_FINAL_HUMAN_SUBMIT', label: '3. SUBMIT_GUARD' },
           ].map((st) => {
             const active =
@@ -165,7 +295,7 @@ export const ExtensionSidePanel: React.FC<ExtensionSidePanelProps> = ({
             ) : (
               <Play className="w-3.5 h-3.5" />
             )}
-            <span>Auto-Fill Page {currentPage}</span>
+            <span>AI Agent Fill Page {currentPage}</span>
           </button>
 
           <button
@@ -179,50 +309,45 @@ export const ExtensionSidePanel: React.FC<ExtensionSidePanelProps> = ({
           </button>
         </div>
 
-        <button
-          type="button"
-          disabled={isExecuting}
-          onClick={onDistillOnly}
-          className="w-full px-3 py-1.5 text-xs font-medium text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md transition-colors flex items-center justify-center gap-1.5"
-        >
-          <Eye className="w-3.5 h-3.5" />
-          <span>Distill Live DOM Only (Tag data-autoapply-id)</span>
-        </button>
-      </div>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            disabled={isExecuting || isPlanningWithAi}
+            onClick={handleRunGeminiPlanForm}
+            className="px-3 py-1.5 text-xs font-medium text-blue-300 bg-blue-950/60 hover:bg-blue-900/60 border border-blue-800 rounded-md transition-colors flex items-center justify-center gap-1.5"
+          >
+            {isPlanningWithAi ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            ) : (
+              <Sparkles className="w-3.5 h-3.5" />
+            )}
+            <span>Re-Plan Answers with Gemini AI</span>
+          </button>
 
-      {/* NFR Token Compression Metrics Strip */}
-      <div className="px-4 py-2.5 bg-slate-950 border-b border-slate-800 grid grid-cols-3 gap-2 text-center">
-        <div>
-          <div className="text-[10px] text-slate-400">Token Reduction</div>
-          <div className="text-xs font-semibold font-mono tabular-nums text-emerald-400">
-            -{telemetry.reductionPercentage}%
-          </div>
-        </div>
-        <div>
-          <div className="text-[10px] text-slate-400">Distilled Budget</div>
-          <div className="text-xs font-semibold font-mono tabular-nums text-slate-200">
-            {telemetry.distilledEstimatedTokens} / 3,000 tok
-          </div>
-        </div>
-        <div>
-          <div className="text-[10px] text-slate-400">Nodes (Shadow)</div>
-          <div className="text-xs font-semibold font-mono tabular-nums text-blue-300">
-            {telemetry.elementsExtracted} ({telemetry.shadowElementsExtracted} shadow)
-          </div>
+          <button
+            type="button"
+            disabled={isExecuting}
+            onClick={onDistillOnly}
+            className="px-3 py-1.5 text-xs font-medium text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-md transition-colors flex items-center justify-center gap-1.5"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            <span>Re-Scan Live DOM</span>
+          </button>
         </div>
       </div>
 
       {/* SidePanel Segmented View Switcher */}
-      <div className="px-4 pt-3 bg-slate-900 border-b border-slate-800 flex items-center gap-1">
+      <div className="px-4 pt-3 bg-slate-900 border-b border-slate-800 flex items-center gap-1 overflow-x-auto">
         {[
+          { id: 'questions', label: `Questions & Types (${aiAnswers.length})` },
           { id: 'actions', label: `Action Plan (${actionPlan.length})` },
           { id: 'dom', label: `Distilled DOM (${distilledElements.length})` },
-          { id: 'mv3', label: 'MV3 Extension Code' },
+          { id: 'mv3', label: 'MV3 Code' },
         ].map((tab) => (
           <button
             key={tab.id}
             type="button"
-            onClick={() => setActiveTab(tab.id as 'actions' | 'dom' | 'mv3')}
+            onClick={() => setActiveTab(tab.id as 'questions' | 'actions' | 'dom' | 'mv3')}
             className={`px-3 py-1.5 text-xs font-medium rounded-t-md border-b-2 transition-colors whitespace-nowrap ${
               activeTab === tab.id
                 ? 'border-blue-500 text-white bg-slate-800/70'
@@ -235,7 +360,115 @@ export const ExtensionSidePanel: React.FC<ExtensionSidePanelProps> = ({
       </div>
 
       {/* Tab Content Viewport */}
-      <div className="p-4 flex-1 overflow-y-auto max-h-[540px] space-y-3">
+      <div className="p-4 flex-1 overflow-y-auto max-h-[600px] space-y-3">
+        {activeTab === 'questions' && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-[11px] text-slate-400">
+              <span>Detected Page Questions, Control Types &amp; Profile Answers</span>
+              <span className="font-mono text-emerald-400">{aiEngineName}</span>
+            </div>
+
+            {aiAnswers.map((ans, idx) => (
+              <div
+                key={ans.question_id}
+                className="p-3 bg-slate-950/90 border border-slate-800 rounded-md space-y-1.5 text-xs"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <span className="font-semibold text-white">
+                    {idx + 1}. {ans.question_text}
+                  </span>
+                  <span className="px-2 py-0.5 text-[10px] font-mono font-semibold bg-blue-950 text-blue-300 border border-blue-800 rounded whitespace-nowrap shrink-0">
+                    {ans.question_type_label}
+                  </span>
+                </div>
+
+                <div className="font-mono text-[11px] text-emerald-300 bg-slate-900 px-2.5 py-1.5 rounded border border-slate-800 break-words">
+                  Answer: {ans.answer}
+                </div>
+
+                <div className="text-[11px] text-slate-400 flex items-center justify-between gap-2">
+                  <span>Source: {ans.profile_source}</span>
+                  <span className="font-mono text-[10px] text-slate-500">
+                    [{ans.agent_ids.join(', ')}]
+                  </span>
+                </div>
+              </div>
+            ))}
+
+            {/* Ask AI Agent Any Custom Question Against Profile */}
+            <div className="p-3.5 bg-slate-950 border border-blue-900/60 rounded-lg space-y-2.5 mt-4">
+              <div className="text-xs font-semibold text-blue-300 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>Test Any Question &amp; Type Against Your Profile</span>
+              </div>
+
+              <input
+                type="text"
+                value={customQuestionText}
+                onChange={(e) => setCustomQuestionText(e.target.value)}
+                placeholder="Ask any question (e.g. What is your degree? / When can you start? / Why hire you?)"
+                className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-700 rounded text-xs text-white"
+              />
+
+              <div className="grid grid-cols-2 gap-2">
+                <select
+                  value={customQuestionType}
+                  onChange={(e) =>
+                    setCustomQuestionType(e.target.value as 'AUTO' | QuestionControlType)
+                  }
+                  className="px-2 py-1.5 bg-slate-900 border border-slate-700 rounded text-xs text-slate-200"
+                >
+                  <option value="AUTO">Auto-Detect Question Type</option>
+                  <option value="DROPDOWN">Dropdown Select</option>
+                  <option value="DT_PICKER">DT Picker (Date)</option>
+                  <option value="OPTION_SELECTION">Option Selection (Radio)</option>
+                  <option value="NUMBER_INPUT">Number Input</option>
+                  <option value="SHORT_TEXT">Short Text</option>
+                  <option value="LONG_ESSAY">Long Essay</option>
+                </select>
+
+                <input
+                  type="text"
+                  value={customOptionsText}
+                  onChange={(e) => setCustomOptionsText(e.target.value)}
+                  placeholder="Options (e.g. B.Tech, M.Tech, MBA)"
+                  className="px-2 py-1.5 bg-slate-900 border border-slate-700 rounded text-xs text-slate-200"
+                />
+              </div>
+
+              <button
+                type="button"
+                disabled={isAskingCustom || !customQuestionText.trim()}
+                onClick={handleAskCustomQuestion}
+                className="w-full py-1.5 px-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-xs font-semibold text-white rounded flex items-center justify-center gap-1.5 transition-colors"
+              >
+                {isAskingCustom ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Send className="w-3.5 h-3.5" />
+                )}
+                <span>Fetch Question Type &amp; Generate Answer from Profile</span>
+              </button>
+
+              {customQuestionResult && (
+                <div className="p-2.5 bg-slate-900 border border-slate-800 rounded text-xs space-y-1">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-mono text-blue-400">
+                      Detected Type: {customQuestionResult.question_type_label}
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-400">
+                      {customQuestionResult.profile_source}
+                    </span>
+                  </div>
+                  <div className="font-mono text-emerald-300 text-xs break-words">
+                    {customQuestionResult.answer}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {activeTab === 'actions' && (
           <>
             {agentState === 'PAUSED_CAPTCHA' && (
@@ -253,10 +486,10 @@ export const ExtensionSidePanel: React.FC<ExtensionSidePanelProps> = ({
 
             {actionPlan.length === 0 ? (
               <div className="text-center py-8 text-xs text-slate-400 space-y-2">
-                <p>No action plan generated for this step yet.</p>
+                <p>No action plan executed on this step yet.</p>
                 <p className="text-[11px] text-slate-500">
-                  Click &quot;Auto-Fill Page {currentPage}&quot; or &quot;Run 4-Page Autopilot&quot;
-                  to distill the live DOM and execute synthetic event injection.
+                  Click &quot;AI Agent Fill Page {currentPage}&quot; or &quot;Run 4-Page
+                  Autopilot&quot; to execute synthetic event injection.
                 </p>
               </div>
             ) : (
@@ -326,7 +559,7 @@ export const ExtensionSidePanel: React.FC<ExtensionSidePanelProps> = ({
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-slate-200 flex items-center gap-1.5">
                 <Code2 className="w-4 h-4 text-blue-400" />
-                Manifest V3 & Content Script Core
+                Manifest V3 v1.3 &amp; Question Type Classifier
               </span>
               <button
                 type="button"

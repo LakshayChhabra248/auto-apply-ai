@@ -9,12 +9,87 @@ import {
   ShieldCheck,
   Trash2,
   Sparkles,
+  Send,
+  Loader2,
 } from 'lucide-react';
 import {
   buildChromeExtensionFiles,
   createExtensionZipUint8Array,
 } from '../utils/extensionPackager';
 import { UserProfileSchema } from '../types/autoapply';
+import {
+  DetectedFormQuestion,
+  AgentQuestionAnswer,
+  QuestionControlType,
+  reasonAnswerForQuestions,
+} from '../utils/questionAgent';
+
+const SAMPLE_MULTI_TYPE_ATS_QUESTIONS: DetectedFormQuestion[] = [
+  {
+    question_id: 'q_1',
+    agent_ids: ['el_1'],
+    question_text: 'Highest Education Qualification / Degree',
+    question_type: 'DROPDOWN',
+    question_type_label: 'Dropdown (4 options)',
+    raw_input_type: 'select-one',
+    options: [
+      { label: 'Bachelor of Technology (B.Tech / B.E.)', value: 'B.Tech' },
+      { label: 'Master of Technology (M.Tech / M.S.)', value: 'M.Tech' },
+      { label: 'Master of Business Administration (MBA)', value: 'MBA' },
+      { label: 'Ph.D. in Computer Science', value: 'PhD' },
+    ],
+  },
+  {
+    question_id: 'q_2',
+    agent_ids: ['el_2'],
+    question_text: 'Most Recent Internship / Work Start Date',
+    question_type: 'DT_PICKER',
+    question_type_label: 'DT Picker (YYYY-MM)',
+    raw_input_type: 'month',
+    options: [],
+    date_format: 'YYYY-MM',
+  },
+  {
+    question_id: 'q_3',
+    agent_ids: ['el_3'],
+    question_text: 'Earliest Available Joining Date',
+    question_type: 'DT_PICKER',
+    question_type_label: 'DT Picker (YYYY-MM-DD)',
+    raw_input_type: 'date',
+    options: [],
+    date_format: 'YYYY-MM-DD',
+  },
+  {
+    question_id: 'q_4',
+    agent_ids: ['el_4a', 'el_4b'],
+    question_text: 'Are you legally authorized to work in India without visa sponsorship?',
+    question_type: 'OPTION_SELECTION',
+    question_type_label: 'Option Selection (Radio · 2 choices)',
+    raw_input_type: 'radio',
+    options: [
+      { label: 'Yes — I am legally authorized to work', value: 'yes', agent_id: 'el_4a' },
+      { label: 'No — I require visa sponsorship', value: 'no', agent_id: 'el_4b' },
+    ],
+  },
+  {
+    question_id: 'q_5',
+    agent_ids: ['el_5'],
+    question_text: 'Cumulative GPA / CGPA (on a 10.0 scale)',
+    question_type: 'NUMBER_INPUT',
+    question_type_label: 'Number Input',
+    raw_input_type: 'number',
+    options: [],
+  },
+  {
+    question_id: 'q_6',
+    agent_ids: ['el_6'],
+    question_text: 'Describe your most complex engineering project and technical architecture.',
+    question_type: 'LONG_ESSAY',
+    question_type_label: 'Long Essay / Screening',
+    raw_input_type: 'textarea',
+    options: [],
+  },
+];
 
 export const ChromeExtensionExportView: React.FC = () => {
   const backendOrigin =
@@ -35,9 +110,19 @@ export const ChromeExtensionExportView: React.FC = () => {
   const [previewEngine, setPreviewEngine] = useState<string | null>(null);
   const [previewIsParsing, setPreviewIsParsing] = useState<boolean>(false);
   const [previewFullProfile, setPreviewFullProfile] = useState<UserProfileSchema | null>(null);
+  const [previewAnswers, setPreviewAnswers] = useState<AgentQuestionAnswer[]>([]);
+  const [isScanningQuestions, setIsScanningQuestions] = useState<boolean>(false);
+
+  // Custom question tester inside SidePanel simulator
+  const [customQText, setCustomQText] = useState<string>('');
+  const [customQType, setCustomQType] = useState<'AUTO' | QuestionControlType>('AUTO');
+  const [customQOptions, setCustomQOptions] = useState<string>('');
+  const [customQAnswer, setCustomQAnswer] = useState<AgentQuestionAnswer | null>(null);
+  const [isAskingCustomQ, setIsAskingCustomQ] = useState<boolean>(false);
+
   const [previewLogs, setPreviewLogs] = useState<string[]>([
-    'Extension installed (clean, unseeded storage).',
-    'Upload your PDF or TXT resume above to extract PDF text & AI profile.',
+    'Extension v1.3 installed (clean, unseeded storage).',
+    'Upload your PDF or TXT resume above to extract your profile and activate the AI Question & Type Agent.',
   ]);
 
   const activeFile = extensionFiles[selectedFileIndex] || extensionFiles[0];
@@ -81,6 +166,49 @@ export const ChromeExtensionExportView: React.FC = () => {
     }
   };
 
+  const runAgentQuestionScanWithProfile = async (
+    targetProfile: UserProfileSchema,
+    resumeFileName?: string
+  ) => {
+    setIsScanningQuestions(true);
+    // 1. Immediately populate baseline answers for all 6 control types
+    const localAnswers = reasonAnswerForQuestions(
+      SAMPLE_MULTI_TYPE_ATS_QUESTIONS,
+      targetProfile,
+      'Software Engineer — Autonomous Agent Systems',
+      resumeFileName
+    );
+    setPreviewAnswers(localAnswers);
+
+    try {
+      const resp = await fetch('/api/agent/plan-form', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          questions: SAMPLE_MULTI_TYPE_ATS_QUESTIONS,
+          profile: targetProfile,
+          jobDescription: 'Software Engineer — Autonomous Agent Systems',
+          cachedResumeFileName: resumeFileName,
+        }),
+      });
+      const data = await resp.json();
+      if (Array.isArray(data?.answers) && data.answers.length > 0) {
+        setPreviewAnswers(data.answers);
+        setPreviewLogs((prev) => [
+          ...prev,
+          `AI Agent scanned ${data.answers.length} questions (Dropdown, DT Picker, Option Selection, Number, Essay) & generated answers via ${data.engine}.`,
+        ]);
+      }
+    } catch {
+      setPreviewLogs((prev) => [
+        ...prev,
+        `Generated answers for ${localAnswers.length} form questions across all control types.`,
+      ]);
+    } finally {
+      setIsScanningQuestions(false);
+    }
+  };
+
   const handlePreviewSidepanelUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -121,6 +249,14 @@ export const ChromeExtensionExportView: React.FC = () => {
           `Extracted ${(data.extractedText || '').length} chars of resume text.`,
           `AI Profile extracted via ${data.engine}: ${p.personal_info.first_name} ${p.personal_info.last_name} (${p.personal_info.email}).`,
         ]);
+        // Automatically demonstrate the AI Question & Type Agent on the newly extracted profile
+        const baseline = reasonAnswerForQuestions(
+          SAMPLE_MULTI_TYPE_ATS_QUESTIONS,
+          p,
+          'Software Engineer — Autonomous Agent Systems',
+          file.name
+        );
+        setPreviewAnswers(baseline);
       }
     } catch {
       setPreviewLogs((prev) => [...prev, 'Failed to parse resume file.']);
@@ -146,6 +282,13 @@ export const ChromeExtensionExportView: React.FC = () => {
       if (data?.profile) {
         setPreviewFullProfile(data.profile);
         setPreviewEngine(data.engine || 'Gemini AI');
+        const baseline = reasonAnswerForQuestions(
+          SAMPLE_MULTI_TYPE_ATS_QUESTIONS,
+          data.profile,
+          'Software Engineer — Autonomous Agent Systems',
+          previewResumeName || 'Resume.pdf'
+        );
+        setPreviewAnswers(baseline);
         setPreviewLogs((prev) => [
           ...prev,
           `Re-extracted profile from text via ${data.engine}.`,
@@ -156,30 +299,97 @@ export const ChromeExtensionExportView: React.FC = () => {
     }
   };
 
+  const handleAskCustomPreviewQuestion = async () => {
+    if (!customQText.trim() || !previewFullProfile) return;
+    setIsAskingCustomQ(true);
+
+    const parsedOpts = customQOptions
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => ({ label: s, value: s }));
+
+    let resolvedType: QuestionControlType =
+      customQType === 'AUTO' ? 'SHORT_TEXT' : customQType;
+    if (customQType === 'AUTO') {
+      if (parsedOpts.length > 0) resolvedType = 'DROPDOWN';
+      else if (/date|dob|joining|graduation|start|end/i.test(customQText))
+        resolvedType = 'DT_PICKER';
+      else if (/how many years|gpa|cgpa|ctc|salary|notice/i.test(customQText))
+        resolvedType = 'NUMBER_INPUT';
+      else if (/why|describe|explain|project|complex|fit|challenge/i.test(customQText))
+        resolvedType = 'LONG_ESSAY';
+    }
+
+    const qObj: DetectedFormQuestion = {
+      question_id: 'custom_sim_1',
+      agent_ids: ['custom_sim_1'],
+      question_text: customQText.trim(),
+      question_type: resolvedType,
+      question_type_label:
+        resolvedType === 'DROPDOWN'
+          ? `Dropdown (${parsedOpts.length || 1} options)`
+          : resolvedType === 'DT_PICKER'
+          ? 'DT Picker (YYYY-MM-DD)'
+          : resolvedType === 'OPTION_SELECTION'
+          ? 'Option Selection (Radio)'
+          : resolvedType,
+      raw_input_type: resolvedType.toLowerCase(),
+      options: parsedOpts,
+      date_format: 'YYYY-MM-DD',
+    };
+
+    try {
+      const resp = await fetch('/api/agent/plan-form', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          questions: [qObj],
+          profile: previewFullProfile,
+          jobDescription: 'Software Engineer — Autonomous Agent Systems',
+        }),
+      });
+      const data = await resp.json();
+      if (data?.answers?.[0]) {
+        setCustomQAnswer(data.answers[0]);
+        setIsAskingCustomQ(false);
+        return;
+      }
+    } catch {
+      // fallback
+    }
+
+    const localAns = reasonAnswerForQuestions([qObj], previewFullProfile)[0];
+    setCustomQAnswer(localAns);
+    setIsAskingCustomQ(false);
+  };
+
   return (
     <div className="space-y-6">
-      {/* Top Banner: Clean, Unseeded Chrome Extension (Manifest V3) Packager */}
+      {/* Top Banner: Clean, Unseeded Chrome Extension (Manifest V3 v1.3) Packager */}
       <section className="bg-white border border-slate-200 rounded-lg p-6 space-y-5">
         <div className="flex flex-wrap items-start justify-between gap-4 pb-4 border-b border-slate-200">
           <div className="space-y-1 max-w-3xl">
             <div className="flex items-center gap-2">
               <span className="px-2 py-0.5 text-[11px] font-mono font-semibold bg-blue-50 text-blue-700 border border-blue-200 rounded">
-                MANIFEST V3 v1.2 · UNSEEDED + AI BRIDGE
+                MANIFEST V3 v1.3 · AI QUESTION &amp; TYPE AGENT
               </span>
               <span className="text-xs font-mono text-emerald-700">
-                Built-in PDF Decompressor + Gemini AI Tab Bridge + Multi-Section Parser
+                Detects Dropdowns, DT Pickers, Option Selections &amp; Answers Any Question From Profile
               </span>
             </div>
             <h1 className="text-xl font-bold text-slate-900">
-              Standalone Chrome Extension — PDF Text Parsing &amp; Gemini AI Profile Extraction
+              Standalone Chrome Extension — AI Question Type Detector &amp; Profile Answer Agent
             </h1>
             <p className="text-sm text-slate-600">
-              Download the updated <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">v1.2.0</code>{' '}
-              Chrome Extension below and click <strong>Reload</strong> in{' '}
+              Download <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">v1.3.0</code>{' '}
+              below and click <strong>Reload</strong> in{' '}
               <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">chrome://extensions</code>.
-              It includes a native browser <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">DecompressionStream</code>{' '}
-              PDF text extractor, a Same-Origin Gemini AI Bridge (<code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">PROXY_PARSE_RESUME</code>),
-              and a full multi-section resume parser inside <code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">sidepanel.js</code>.
+              The extension now inspects every form question, identifies its exact control type (
+              <strong>Dropdown</strong>, <strong>DT Picker</strong>, <strong>Option Selection</strong>,{' '}
+              <strong>Number</strong>, <strong>Short Text</strong>, or <strong>Long Essay</strong>),
+              and uses Gemini AI (<code className="font-mono text-xs bg-slate-100 px-1 py-0.5 rounded">PROXY_PLAN_FORM</code>)
+              + the Profile Reasoner to answer any question from your generated profile.
             </p>
           </div>
 
@@ -196,48 +406,47 @@ export const ChromeExtensionExportView: React.FC = () => {
             ) : (
               <>
                 <Download className="w-4 h-4" />
-                <span>Download Chrome Extension v1.2 (.zip)</span>
+                <span>Download Chrome Extension v1.3 (.zip)</span>
               </>
             )}
           </button>
         </div>
 
-        {/* 4-Step Installation & Post-Install Resume Upload Guide */}
+        {/* 4-Step Guide */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5">
             <div className="text-xs font-mono font-bold text-blue-600">STEP 01</div>
-            <h2 className="text-sm font-semibold text-slate-900">Download &amp; Unzip v1.2</h2>
+            <h2 className="text-sm font-semibold text-slate-900">Download &amp; Reload v1.3</h2>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Click <strong>Download Chrome Extension v1.2 (.zip)</strong> above and extract it into
-              your extension folder.
+              Click <strong>Download Chrome Extension v1.3 (.zip)</strong> above, extract it, and
+              click <strong>Reload</strong> in <code className="font-mono">chrome://extensions</code>.
             </p>
           </div>
 
           <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5">
             <div className="text-xs font-mono font-bold text-blue-600">STEP 02</div>
-            <h2 className="text-sm font-semibold text-slate-900">Load / Reload in Chrome</h2>
+            <h2 className="text-sm font-semibold text-slate-900">Upload Resume in SidePanel</h2>
             <p className="text-xs text-slate-600 leading-relaxed">
-              In <code className="font-mono bg-white px-1 py-0.5 border border-slate-200 rounded">chrome://extensions</code>,
-              click <strong>Load unpacked</strong> (or click the circular <strong>Reload</strong> icon
-              if you already loaded v1.0).
+              Upload your PDF or TXT resume in the SidePanel to decompress the PDF text and build
+              your <code className="font-mono">profile_schema.json</code> with Gemini AI.
             </p>
           </div>
 
           <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5">
             <div className="text-xs font-mono font-bold text-blue-600">STEP 03</div>
-            <h2 className="text-sm font-semibold text-slate-900">Upload PDF in SidePanel</h2>
+            <h2 className="text-sm font-semibold text-slate-900">Scan Questions &amp; Types</h2>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Click <strong>Upload / Update Resume (PDF or TXT)</strong> in the SidePanel. It
-              decompresses the PDF text immediately and runs Gemini AI extraction.
+              Click <strong>1. Scan Questions, Types &amp; Generate AI Answers</strong> to see every
+              question, its type (Dropdown, DT Picker, Radio), and the AI-generated answer.
             </p>
           </div>
 
           <div className="p-4 bg-slate-50 border border-slate-200 rounded-lg space-y-1.5">
             <div className="text-xs font-mono font-bold text-blue-600">STEP 04</div>
-            <h2 className="text-sm font-semibold text-slate-900">Autofill Any External Form</h2>
+            <h2 className="text-sm font-semibold text-slate-900">AI Agent Form Fill</h2>
             <p className="text-xs text-slate-600 leading-relaxed">
-              Open any job portal (Workday, Greenhouse, Lever, LinkedIn) and click{' '}
-              <strong>Autofill Current Form Page</strong> in the SidePanel.
+              Click <strong>2. AI Agent: Fill All Answers into Form</strong> to select dropdowns,
+              populate DT pickers, click radio options, and fill screening answers.
             </p>
           </div>
         </div>
@@ -251,7 +460,7 @@ export const ChromeExtensionExportView: React.FC = () => {
             <div className="flex items-center gap-2">
               <FileCode className="w-4 h-4 text-blue-400" />
               <span className="text-xs font-semibold text-white">
-                Unseeded Chrome Extension v1.2 Source Files (Manifest V3)
+                Unseeded Chrome Extension v1.3 Source Files (Manifest V3)
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -305,7 +514,7 @@ export const ChromeExtensionExportView: React.FC = () => {
             {activeFile.description}
           </div>
 
-          <pre className="p-4 text-xs font-mono text-slate-200 overflow-x-auto max-h-[680px] leading-relaxed">
+          <pre className="p-4 text-xs font-mono text-slate-200 overflow-x-auto max-h-[780px] leading-relaxed">
             {activeFile.content}
           </pre>
         </section>
@@ -316,9 +525,9 @@ export const ChromeExtensionExportView: React.FC = () => {
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div>
                 <span className="text-[10px] font-mono uppercase tracking-wider text-blue-400 block">
-                  Interactive SidePanel Simulator (sidepanel.html)
+                  Interactive SidePanel Simulator (sidepanel.html v1.3)
                 </span>
-                <h2 className="text-sm font-bold text-white">AutoApply AI — Chrome SidePanel</h2>
+                <h2 className="text-sm font-bold text-white">AutoApply AI Agent — Chrome SidePanel</h2>
               </div>
               <span
                 className={`px-2 py-0.5 text-[11px] font-mono rounded ${
@@ -371,7 +580,7 @@ export const ChromeExtensionExportView: React.FC = () => {
                   Extracted PDF Text / Paste Resume Text
                 </label>
                 <textarea
-                  rows={4}
+                  rows={3}
                   value={previewExtractedText}
                   onChange={(e) => setPreviewExtractedText(e.target.value)}
                   placeholder="Uploaded PDF text appears here automatically..."
@@ -388,11 +597,132 @@ export const ChromeExtensionExportView: React.FC = () => {
               </div>
             </div>
 
-            {/* Step 2 inside SidePanel: Extracted Candidate Profile & JSON */}
+            {/* Step 2 inside SidePanel: AI Form Question & Type Agent Inspector */}
             <div className="p-3.5 bg-slate-800/80 border border-slate-700 rounded-lg space-y-3">
               <div className="flex items-center justify-between">
                 <span className="font-semibold text-slate-200 uppercase tracking-wider text-[11px]">
-                  2. Extracted Candidate Profile
+                  2. AI Form Question &amp; Type Agent
+                </span>
+                <span className="font-mono text-[11px] text-emerald-400">
+                  {previewAnswers.length} questions analyzed
+                </span>
+              </div>
+
+              <button
+                type="button"
+                id="btn-preview-scan-questions"
+                disabled={!previewFullProfile || isScanningQuestions}
+                onClick={() =>
+                  previewFullProfile &&
+                  runAgentQuestionScanWithProfile(
+                    previewFullProfile,
+                    previewResumeName || undefined
+                  )
+                }
+                className="w-full py-2 px-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-40 text-xs font-semibold text-white rounded flex items-center justify-center gap-1.5 transition-colors"
+              >
+                {isScanningQuestions ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5" />
+                )}
+                <span>Scan Questions, Detect Types &amp; Generate AI Answers</span>
+              </button>
+
+              {previewAnswers.length > 0 && (
+                <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
+                  {previewAnswers.map((ans, i) => (
+                    <div
+                      key={ans.question_id}
+                      className="p-2.5 bg-slate-950 border border-slate-800 rounded space-y-1 text-xs"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="font-semibold text-slate-100 text-[11px]">
+                          {i + 1}. {ans.question_text}
+                        </span>
+                        <span className="px-1.5 py-0.5 text-[9px] font-mono font-semibold bg-blue-950 text-blue-300 border border-blue-800 rounded whitespace-nowrap shrink-0">
+                          {ans.question_type_label}
+                        </span>
+                      </div>
+                      <div className="font-mono text-[11px] text-emerald-300 bg-slate-900 px-2 py-1 rounded border border-slate-800 break-words">
+                        {ans.answer}
+                      </div>
+                      <div className="text-[10px] text-slate-400">
+                        Source: {ans.profile_source}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Custom Question & Type Tester */}
+              <div className="pt-2 border-t border-slate-700/80 space-y-2">
+                <label className="block text-[10px] font-semibold text-blue-300">
+                  3. Ask AI Agent Any Question From Your Uploaded Profile
+                </label>
+                <input
+                  type="text"
+                  id="sidepanel-custom-question"
+                  value={customQText}
+                  onChange={(e) => setCustomQText(e.target.value)}
+                  placeholder="e.g. What is your university? / When can you start? / Why hire you?"
+                  className="w-full px-2.5 py-1.5 bg-slate-950 border border-slate-700 rounded text-xs text-white"
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <select
+                    value={customQType}
+                    onChange={(e) =>
+                      setCustomQType(e.target.value as 'AUTO' | QuestionControlType)
+                    }
+                    className="px-2 py-1 bg-slate-950 border border-slate-700 rounded text-[11px] text-slate-200"
+                  >
+                    <option value="AUTO">Auto-Detect Type</option>
+                    <option value="DROPDOWN">Dropdown Select</option>
+                    <option value="DT_PICKER">DT Picker (Date)</option>
+                    <option value="OPTION_SELECTION">Option Selection</option>
+                    <option value="NUMBER_INPUT">Number Input</option>
+                    <option value="SHORT_TEXT">Short Text</option>
+                    <option value="LONG_ESSAY">Long Essay</option>
+                  </select>
+                  <input
+                    type="text"
+                    value={customQOptions}
+                    onChange={(e) => setCustomQOptions(e.target.value)}
+                    placeholder="Options (comma-sep)"
+                    className="px-2 py-1 bg-slate-950 border border-slate-700 rounded text-[11px] text-slate-200"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={!previewFullProfile || !customQText.trim() || isAskingCustomQ}
+                  onClick={handleAskCustomPreviewQuestion}
+                  className="w-full py-1.5 px-3 bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-xs font-semibold text-white rounded flex items-center justify-center gap-1.5 transition-colors"
+                >
+                  {isAskingCustomQ ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Send className="w-3.5 h-3.5" />
+                  )}
+                  <span>Generate Answer from My Profile</span>
+                </button>
+                {customQAnswer && (
+                  <div className="p-2 bg-slate-950 border border-blue-800/80 rounded text-[11px] space-y-1">
+                    <div className="font-mono text-blue-300 text-[10px]">
+                      Detected Type: {customQAnswer.question_type_label}
+                    </div>
+                    <div className="font-mono text-emerald-300 break-words">
+                      {customQAnswer.answer}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Step 3 inside SidePanel: Extracted Candidate Profile & JSON */}
+            <div className="p-3.5 bg-slate-800/80 border border-slate-700 rounded-lg space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="font-semibold text-slate-200 uppercase tracking-wider text-[11px]">
+                  4. Extracted Candidate Profile
                 </span>
                 {previewFullProfile && (
                   <button
@@ -402,6 +732,8 @@ export const ChromeExtensionExportView: React.FC = () => {
                       setPreviewResumeName(null);
                       setPreviewExtractedText('');
                       setPreviewEngine(null);
+                      setPreviewAnswers([]);
+                      setCustomQAnswer(null);
                       setPreviewLogs((prev) => [
                         ...prev,
                         'Cleared stored resume & profile from chrome.storage.local.',
@@ -477,20 +809,9 @@ export const ChromeExtensionExportView: React.FC = () => {
                   />
                 </div>
               </div>
-
-              {previewFullProfile && (
-                <div className="space-y-1">
-                  <label className="block text-[10px] text-slate-400">
-                    Extracted profile_schema.json
-                  </label>
-                  <pre className="p-2.5 bg-slate-950 border border-slate-800 rounded text-[10px] font-mono text-emerald-300 max-h-44 overflow-y-auto leading-relaxed">
-                    {JSON.stringify(previewFullProfile, null, 2)}
-                  </pre>
-                </div>
-              )}
             </div>
 
-            {/* Step 3 inside SidePanel: Execution Log */}
+            {/* Step 5 inside SidePanel: Execution Log */}
             <div className="p-3 bg-slate-950 border border-slate-800 rounded-md font-mono text-[11px] text-slate-300 space-y-1 max-h-28 overflow-y-auto">
               {previewLogs.map((l, i) => (
                 <div key={i}>&gt; {l}</div>
@@ -502,7 +823,7 @@ export const ChromeExtensionExportView: React.FC = () => {
             <div className="flex items-center gap-2 pb-2 border-b border-slate-200">
               <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
               <h3 className="text-sm font-semibold text-slate-900">
-                Why v1.2 Parses PDFs &amp; Runs AI Reliably
+                How v1.3 Detects Question Types &amp; Generates Profile Answers
               </h3>
             </div>
 
@@ -510,21 +831,23 @@ export const ChromeExtensionExportView: React.FC = () => {
               <li className="flex items-start gap-2">
                 <Layers className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
                 <span>
-                  <strong>Native Browser PDF Decompression:</strong>{' '}
-                  <code className="font-mono">sidepanel.js</code> uses Chrome&apos;s native{' '}
-                  <code className="font-mono">DecompressionStream(&apos;deflate&apos;)</code> to
-                  inflate PDF <code className="font-mono">FlateDecode</code> streams and decode{' '}
-                  <code className="font-mono">BT...ET</code> text blocks directly in the browser.
+                  <strong>Overarching Question Extraction:</strong> Walks up to{' '}
+                  <code className="font-mono">&lt;fieldset&gt;&lt;legend&gt;</code>,{' '}
+                  <code className="font-mono">[role=&quot;radiogroup&quot;]</code>, and question
+                  containers so radio/checkbox choices (&quot;Yes&quot; / &quot;No&quot;) are
+                  grouped under the actual question prompt.
                 </span>
               </li>
               <li className="flex items-start gap-2">
                 <Layers className="w-4 h-4 text-blue-600 shrink-0 mt-0.5" />
                 <span>
-                  <strong>Same-Origin Gemini AI Tab Bridge:</strong> When the AutoApply AI web app
-                  tab is open in Chrome, <code className="font-mono">sidepanel.js</code> proxies{' '}
-                  <code className="font-mono">/api/resume/parse</code> through{' '}
-                  <code className="font-mono">content.js</code> (<code className="font-mono">PROXY_PARSE_RESUME</code>)
-                  so Gemini AI extraction succeeds without cross-origin cookie blocks.
+                  <strong>Multi-Type Classification &amp; Formatting:</strong> Distinguishes{' '}
+                  <code className="font-mono">DROPDOWN</code> (with extracted options),{' '}
+                  <code className="font-mono">DT_PICKER</code> (<code className="font-mono">YYYY-MM-DD</code>{' '}
+                  or <code className="font-mono">YYYY-MM</code>),{' '}
+                  <code className="font-mono">OPTION_SELECTION</code>,{' '}
+                  <code className="font-mono">NUMBER_INPUT</code>, and{' '}
+                  <code className="font-mono">LONG_ESSAY</code>.
                 </span>
               </li>
             </ul>

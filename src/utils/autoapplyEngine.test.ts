@@ -295,3 +295,107 @@ test('buildChromeExtensionFiles and createExtensionZipUint8Array generate unseed
   assert.equal(zipBytes[2], 0x03);
   assert.equal(zipBytes[3], 0x04);
 });
+
+import {
+  convertDistilledElementsToQuestions,
+  reasonAnswerForQuestions,
+} from './questionAgent';
+
+test('convertDistilledElementsToQuestions and reasonAnswerForQuestions detect Dropdowns, DT Pickers, Option Selections, and answer any question from profile', () => {
+  const sampleElements: DistilledElement[] = [
+    {
+      agent_id: 'el_deg',
+      tag: 'select',
+      type: 'select-one',
+      label: 'Highest Qualification / Degree',
+      placeholder: '',
+      options: ['Bachelor of Technology (B.Tech)', 'Master of Technology (M.Tech)', 'MBA'],
+      current_value: '',
+    },
+    {
+      agent_id: 'el_dt',
+      tag: 'input',
+      type: 'month',
+      label: 'Most Recent Work Start Date',
+      placeholder: 'YYYY-MM',
+      options: null,
+      current_value: '',
+    },
+    {
+      agent_id: 'el_join',
+      tag: 'input',
+      type: 'date',
+      label: 'Earliest Joining Date',
+      placeholder: 'YYYY-MM-DD',
+      options: null,
+      current_value: '',
+    },
+    {
+      agent_id: 'el_r1',
+      tag: 'input',
+      type: 'radio',
+      name: 'sponsorship_radio',
+      label: 'Yes — I require sponsorship or have >30 days notice',
+      placeholder: '',
+      options: null,
+      current_value: 'yes',
+    },
+    {
+      agent_id: 'el_r2',
+      tag: 'input',
+      type: 'radio',
+      name: 'sponsorship_radio',
+      label: 'No — Authorized & Immediate',
+      placeholder: '',
+      options: null,
+      current_value: 'no',
+    },
+    {
+      agent_id: 'el_gpa',
+      tag: 'input',
+      type: 'number',
+      label: 'Cumulative GPA / CGPA',
+      placeholder: '9.4',
+      options: null,
+      current_value: '',
+    },
+    {
+      agent_id: 'el_essay',
+      tag: 'textarea',
+      type: 'textarea',
+      label: 'Describe your most complex engineering project and architecture',
+      placeholder: '',
+      options: null,
+      current_value: '',
+    },
+  ];
+
+  const questions = convertDistilledElementsToQuestions(sampleElements);
+  // 2 radio buttons with same name are grouped into 1 OPTION_SELECTION question => 6 questions total
+  assert.equal(questions.length, 6);
+  assert.equal(questions[0].question_type, 'DROPDOWN');
+  assert.equal(questions[1].question_type, 'DT_PICKER');
+  assert.equal(questions[1].date_format, 'YYYY-MM');
+  assert.equal(questions[2].question_type, 'DT_PICKER');
+  assert.equal(questions[2].date_format, 'YYYY-MM-DD');
+  assert.equal(questions[3].question_type, 'OPTION_SELECTION');
+  assert.equal(questions[3].options.length, 2);
+  assert.equal(questions[4].question_type, 'NUMBER_INPUT');
+  assert.equal(questions[5].question_type, 'LONG_ESSAY');
+
+  const answers = reasonAnswerForQuestions(questions, DEFAULT_USER_PROFILE);
+  assert.equal(answers.length, 6);
+  // Dropdown matched "Bachelor of Technology (B.Tech)" from profile degree "B.Tech"
+  assert.equal(answers[0].answer, 'Bachelor of Technology (B.Tech)');
+  // DT Picker YYYY-MM formatted from work_experience[0].start_date
+  assert.equal(answers[1].answer, DEFAULT_USER_PROFILE.work_experience[0].start_date);
+  // DT Picker YYYY-MM-DD formatted from earliest_joining_date
+  assert.equal(answers[2].answer, DEFAULT_USER_PROFILE.application_metadata.earliest_joining_date);
+  // Option Selection Radio matched "Yes..." since notice_period_days is 45 (>30)
+  assert.equal(answers[3].selected_option_agent_id, 'el_r1');
+  // Number Input GPA
+  assert.equal(answers[4].answer, String(DEFAULT_USER_PROFILE.education[0].gpa));
+  // Long Essay >= 150 chars
+  assert.ok(answers[5].answer.length >= 150);
+});
+

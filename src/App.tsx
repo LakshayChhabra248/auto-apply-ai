@@ -640,6 +640,8 @@ export default function App() {
                 actionPlan={actionPlan}
                 telemetry={telemetry}
                 isExecuting={isExecuting}
+                profile={profile}
+                cachedResumeFileName={cachedResume.fileName}
                 onDistillOnly={runLiveDistillation}
                 onRunCurrentPageAgent={handleRunCurrentPageAgent}
                 onRunFullAutopilot={handleRunFullAutopilot}

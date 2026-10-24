@@ -9,6 +9,13 @@ import {
   classifyRecruiterEmailDeterministic,
 } from './src/utils/autoapplyEngine.ts';
 import { parseResumeTextToProfile, normalizeResumeText } from './src/utils/resumeParser.ts';
+import {
+  convertDistilledElementsToQuestions,
+  reasonAnswerForQuestions,
+  matchBestOption,
+  formatProfileDateForPicker,
+  DetectedFormQuestion,
+} from './src/utils/questionAgent.ts';
 import { DEFAULT_USER_PROFILE } from './src/data/seedProfile.ts';
 
 dotenv.config();
@@ -448,6 +455,147 @@ ${extractedText}`,
         extractedText ||
         `Extracted from ${fileName || 'uploaded PDF'}: ${deterministicBaseline.personal_info.first_name} ${deterministicBaseline.personal_info.last_name}`,
       engine: 'layout-aware-pdf-parser',
+    });
+  });
+
+  // FR 2.3 & FR 2.5: Full AI Agent Form Question & Type Analyzer + Answer Generator
+  app.post('/api/agent/plan-form', async (req, res) => {
+    const { questions, elements, profile, jobDescription, cachedResumeFileName } = req.body || {};
+    const safeProfile = profile || DEFAULT_USER_PROFILE;
+    const safeJd = jobDescription || 'Software Engineer — Autonomous Agent Systems';
+
+    const detectedQuestions: DetectedFormQuestion[] = Array.isArray(questions)
+      ? questions
+      : Array.isArray(elements)
+      ? convertDistilledElementsToQuestions(elements)
+      : [];
+
+    if (detectedQuestions.length === 0) {
+      res.json({ questions: [], answers: [], engine: 'ai-form-agent' });
+      return;
+    }
+
+    // 1. Compute instant baseline answers for every detected question & control type
+    const baselineAnswers = reasonAnswerForQuestions(
+      detectedQuestions,
+      safeProfile,
+      safeJd,
+      cachedResumeFileName
+    );
+
+    // 2. Enhance with Gemini AI so any arbitrary/unseen question is answered from the candidate's profile
+    const ai = getGeminiClient();
+    if (ai) {
+      try {
+        const compactQuestions = detectedQuestions.map((q) => ({
+          question_id: q.question_id,
+          question_text: q.question_text,
+          question_type: q.question_type,
+          date_format: q.date_format || null,
+          options: (q.options || []).slice(0, 20).map((o) => o.label),
+        }));
+
+        const { response, modelUsed } = await generateWithFastModelCascade(ai, {
+          contents: `You are an autonomous Job Application AI Agent. Given the candidate's JSON profile and the form questions extracted from the webpage, generate the exact answer for EVERY question according to its question_type:
+- DROPDOWN or OPTION_SELECTION: Pick the exact matching option string from the question's "options" list (or "Checked (Yes)" / "Unchecked (No)" for single checkboxes).
+- DT_PICKER: Format the relevant date from the candidate's profile into the exact "date_format" (e.g. YYYY-MM-DD or YYYY-MM).
+- NUMBER_INPUT: Output only the numeric value (e.g. GPA, notice period days, CTC, or years of experience).
+- SHORT_TEXT: Output the concise factual value from the candidate's profile.
+- LONG_ESSAY: Write a compelling first-person answer (at least 160 characters) citing specific companies, projects, tech stack, and metrics from the candidate's profile.
+
+Return ONLY valid JSON (no markdown fences) in this format:
+{
+  "answers": [
+    {
+      "question_id": "q_1",
+      "answer": "string",
+      "profile_source": "which profile field was used",
+      "reasoning": "1 short sentence explaining how the answer matches the question type and profile"
+    }
+  ]
+}
+
+Candidate Profile JSON:
+${JSON.stringify(safeProfile)}
+
+Target Job Context:
+${safeJd}
+
+Form Questions:
+${JSON.stringify(compactQuestions)}`,
+          config: {
+            systemInstruction:
+              'You are an autonomous AI Form-Filling Agent. Output ONLY valid JSON mapping every question_id to its profile-grounded answer.',
+          },
+        });
+
+        const rawJson = response.text || '';
+        const parsed = parseJsonFromLlmText(rawJson);
+        if (parsed && Array.isArray(parsed.answers)) {
+          const aiMap = new Map<
+            string,
+            { answer?: string; profile_source?: string; reasoning?: string }
+          >();
+          for (const item of parsed.answers) {
+            if (item && item.question_id) {
+              aiMap.set(String(item.question_id), item);
+            }
+          }
+
+          const mergedAnswers = baselineAnswers.map((baseAns) => {
+            const qObj = detectedQuestions.find((q) => q.question_id === baseAns.question_id);
+            const aiItem = aiMap.get(baseAns.question_id);
+            if (!aiItem || !aiItem.answer || !String(aiItem.answer).trim()) {
+              return baseAns;
+            }
+
+            let finalAns = String(aiItem.answer).trim();
+            let selectedOptAgentId = baseAns.selected_option_agent_id;
+            let selectedOptVal = baseAns.selected_option_value;
+
+            if (qObj && (qObj.question_type === 'DROPDOWN' || qObj.question_type === 'OPTION_SELECTION')) {
+              if (qObj.options && qObj.options.length > 0) {
+                const matched = matchBestOption(qObj.options, finalAns, qObj.question_text);
+                if (matched) {
+                  finalAns = matched.label;
+                  selectedOptVal = matched.value;
+                  if (matched.agent_id) selectedOptAgentId = matched.agent_id;
+                }
+              }
+            } else if (qObj && qObj.question_type === 'DT_PICKER') {
+              finalAns = formatProfileDateForPicker(
+                finalAns,
+                qObj.date_format || 'YYYY-MM-DD',
+                baseAns.answer
+              );
+            }
+
+            return {
+              ...baseAns,
+              answer: finalAns,
+              selected_option_agent_id: selectedOptAgentId,
+              selected_option_value: selectedOptVal,
+              profile_source: aiItem.profile_source || baseAns.profile_source,
+              reasoning: aiItem.reasoning || baseAns.reasoning,
+            };
+          });
+
+          res.json({
+            questions: detectedQuestions,
+            answers: mergedAnswers,
+            engine: `${modelUsed} (AI Form Question & Type Agent)`,
+          });
+          return;
+        }
+      } catch (err) {
+        console.warn('Gemini plan-form fallback triggered:', err);
+      }
+    }
+
+    res.json({
+      questions: detectedQuestions,
+      answers: baselineAnswers,
+      engine: 'profile-question-type-agent',
     });
   });
 
